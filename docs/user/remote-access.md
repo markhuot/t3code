@@ -406,6 +406,22 @@ pairing links and revoke client sessions. Revoking an unused link prevents new
 pairings; revoke a device's session to remove its existing access. Command-line
 management is available through `t3 auth --help`.
 
+### Team members
+
+Every prompt records who sent it. Each pairing link is created for one team
+member, either an existing one or a new one, and a device paired with it signs in
+as that member. The host's own desktop app is the owner. A device that is not
+signed in as a member cannot send prompts, run scheduled tasks, or change who has
+access; give it a personal pairing link.
+
+A scheduled task runs on behalf of whoever last saved its prompt or where it
+sends it.
+
+Rename a member under **Team members** in the same page. Past messages keep the
+name they were sent with. Removing a member signs out all of their devices, and a
+T3 Connect device of theirs needs your approval to connect again. Their scheduled
+tasks stop running until someone else saves them. The owner cannot be removed.
+
 When the app connects to more than one environment, choose one at the top of the
 page. A desktop app with **Local environment** off can manage a background
 service on the same machine this way, including its T3 Connect link.

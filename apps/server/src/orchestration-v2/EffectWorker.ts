@@ -32,6 +32,7 @@ import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationServic
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
+import { withTeamActor } from "./teamsActor.ts";
 
 const isProviderTurnControlError = Schema.is(ProviderTurnControlService.ProviderTurnControlError);
 
@@ -409,6 +410,7 @@ export const layerExecutor: Layer.Layer<
                         },
                         createdBy: message.createdBy,
                         creationSource: message.creationSource,
+                        ...withTeamActor(message.actor),
                         ...(message.delegatedCompletion === undefined
                           ? {}
                           : { delegatedCompletion: message.delegatedCompletion }),

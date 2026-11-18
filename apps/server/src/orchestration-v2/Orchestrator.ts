@@ -79,6 +79,7 @@ import {
   TurnItemId,
   TrimmedNonEmptyString,
   managedRuntimeModeCeilingMessage,
+  type TeamActor, // teams
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
@@ -204,6 +205,7 @@ import {
   ThreadForkServiceV2,
 } from "./ThreadForkService.ts";
 import { planThreadDeletion } from "./ThreadDeletion.ts";
+import { inheritsThreadDriver, latestUserMessageActor, withTeamActor } from "./teamsActor.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ServerSettings from "../serverSettings.ts";
 
@@ -526,6 +528,10 @@ export interface OrchestratorV2Shape {
   readonly getThreadShell: (
     threadId: ThreadId,
   ) => Effect.Effect<OrchestrationV2ThreadShell | null, OrchestratorV2Error>;
+  /** teams: who work started from this thread acts on behalf of; see `teamsActor.ts`. */
+  readonly getThreadDriver: (
+    threadId: ThreadId,
+  ) => Effect.Effect<TeamActor | undefined, OrchestratorV2Error>;
   readonly findGuestShareThreadId: (
     shareId: GuestShareId,
   ) => Effect.Effect<ThreadId | null, OrchestratorV2Error>;
@@ -839,6 +845,7 @@ function threadCreateInitialMessage(
         : { type: "defer_start", workspaceStrategy },
     createdBy: command.createdBy,
     creationSource: command.creationSource,
+    ...withTeamActor(command.actor),
   };
 }
 
@@ -1793,6 +1800,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const findThread = (threadId: ThreadId) =>
     projectionStore
       .findThread(threadId)
+      .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
+
+  // teams: whom work started from this thread acts on behalf of.
+  const threadDriver = (threadId: ThreadId) =>
+    projectionStore
+      .getThreadDriver(threadId)
       .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
 
   /** Side chats live inside their parent, so deleting the parent deletes them too. */
@@ -2975,6 +2988,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...(queuedMessage.context ? { context: queuedMessage.context } : {}),
           createdBy: queuedMessage.createdBy,
           creationSource: queuedMessage.creationSource,
+          ...withTeamActor(queuedMessage.actor),
           ...(queuedMessage.scheduledTaskId === undefined
             ? {}
             : { scheduledTaskId: queuedMessage.scheduledTaskId }),
@@ -3754,9 +3768,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
     const now = yield* DateTime.now;
     const emitEvent = emit(events, command);
+    // teams: a thread another thread launched works for that thread's driver.
+    const actor =
+      command.actor ??
+      (command.initialMessage?.senderThreadId === undefined
+        ? undefined
+        : yield* threadDriver(command.initialMessage.senderThreadId));
     const thread: OrchestrationV2AppThread = {
       createdBy: command.createdBy,
       creationSource: command.creationSource,
+      ...withTeamActor(actor),
       id: command.threadId,
       projectId: command.projectId,
       title: command.title,
@@ -5776,6 +5797,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.sideChat ? { sideChat: true } : {}),
         createdBy: command.createdBy,
         creationSource: command.creationSource,
+        // teams
+        actor: command.actor ?? (yield* threadDriver(command.sourceThreadId)),
         createdAt: now,
       })
       .pipe(mapDispatchError(command));
@@ -6020,6 +6043,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly context?: import("@t3tools/contracts").OrchestrationMessageContext | undefined;
     readonly createdBy: OrchestrationV2ConversationMessage["createdBy"];
     readonly creationSource: OrchestrationV2ConversationMessage["creationSource"];
+    readonly actor?: OrchestrationV2ConversationMessage["actor"];
     readonly scheduledTaskId?: OrchestrationV2ConversationMessage["scheduledTaskId"];
     readonly senderThreadId?: OrchestrationV2ConversationMessage["senderThreadId"];
     readonly linkedSender?: OrchestrationV2ConversationMessage["linkedSender"];
@@ -6159,6 +6183,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const message: OrchestrationV2ConversationMessage = {
           createdBy: input.createdBy,
           creationSource: input.creationSource,
+          ...withTeamActor(input.actor),
           ...(input.delegatedCompletion === undefined
             ? {}
             : { delegatedCompletion: input.delegatedCompletion }),
@@ -6184,6 +6209,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const turnItem: OrchestrationV2TurnItem = {
           createdBy: input.createdBy,
           creationSource: input.creationSource,
+          ...withTeamActor(input.actor),
           ...(input.scheduledTaskId === undefined
             ? {}
             : { scheduledTaskId: input.scheduledTaskId }),
@@ -6783,6 +6809,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           }
         : undefined,
     );
+    // teams: work sent without an actor acts for the sender thread's driver, else the target's.
+    // The projection holds only recent runs plus pending events, so older drivers come from storage.
+    if (command.actor === undefined && inheritsThreadDriver(command)) {
+      const actor =
+        (command.senderThreadId === undefined
+          ? undefined
+          : yield* threadDriver(command.senderThreadId)) ??
+        latestUserMessageActor(projection.messages) ??
+        (yield* threadDriver(command.threadId)) ??
+        projection.thread.actor;
+      if (actor !== undefined) command = { ...command, actor };
+    }
     if (command.steerFollowUpOfRunId !== undefined) {
       const source = projection.runs.find((run) => run.id === command.steerFollowUpOfRunId);
       if (
@@ -7429,6 +7467,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         attachments: command.attachments,
         createdBy: command.createdBy,
         creationSource: command.creationSource,
+        ...withTeamActor(command.actor),
         ...(command.scheduledTaskId === undefined
           ? {}
           : { scheduledTaskId: command.scheduledTaskId }),
@@ -7724,6 +7763,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const message: OrchestrationV2ConversationMessage = {
         createdBy: command.createdBy,
         creationSource: command.creationSource,
+        ...withTeamActor(command.actor),
         ...(command.scheduledTaskId === undefined
           ? {}
           : { scheduledTaskId: command.scheduledTaskId }),
@@ -8142,6 +8182,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const message: OrchestrationV2ConversationMessage = {
         createdBy: command.createdBy,
         creationSource: command.creationSource,
+        ...withTeamActor(command.actor),
         ...(command.scheduledTaskId === undefined
           ? {}
           : { scheduledTaskId: command.scheduledTaskId }),
@@ -8168,6 +8209,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const turnItem: OrchestrationV2TurnItem = {
         createdBy: command.createdBy,
         creationSource: command.creationSource,
+        ...withTeamActor(command.actor),
         ...(command.scheduledTaskId === undefined
           ? {}
           : { scheduledTaskId: command.scheduledTaskId }),
@@ -8938,6 +8980,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const message: OrchestrationV2ConversationMessage = {
       createdBy: command.createdBy,
       creationSource: command.creationSource,
+      ...withTeamActor(command.actor),
       ...(command.scheduledTaskId === undefined
         ? {}
         : { scheduledTaskId: command.scheduledTaskId }),
@@ -8961,6 +9004,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const turnItem: OrchestrationV2TurnItem = {
       createdBy: command.createdBy,
       creationSource: command.creationSource,
+      ...withTeamActor(command.actor),
       ...(command.scheduledTaskId === undefined
         ? {}
         : { scheduledTaskId: command.scheduledTaskId }),
@@ -9454,19 +9498,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.title === undefined ? {} : { title: command.title }),
         ordinal: (yield* subagentCount(command.parentThreadId)) + 1,
       });
+      const delegatedActor = command.actor ?? (yield* threadDriver(command.parentThreadId));
+      const { actor: _parentActor, ...childBase } = makeSubagentChildThread({
+        parentThread: parentProjection.thread,
+        childThreadId,
+        parentNodeId: taskNodeId,
+        activeProviderThreadId: null,
+        providerInstanceId: command.modelSelection.instanceId,
+        modelSelection: command.modelSelection,
+        title: taskTitle,
+        now,
+        createdBy: command.createdBy,
+        creationSource: command.creationSource,
+      });
       const childThread: OrchestrationV2AppThread = {
-        ...makeSubagentChildThread({
-          parentThread: parentProjection.thread,
-          childThreadId,
-          parentNodeId: taskNodeId,
-          activeProviderThreadId: null,
-          providerInstanceId: command.modelSelection.instanceId,
-          modelSelection: command.modelSelection,
-          title: taskTitle,
-          now,
-          createdBy: command.createdBy,
-          creationSource: command.creationSource,
-        }),
+        ...childBase,
+        ...withTeamActor(delegatedActor),
         runtimeMode: command.runtimeMode,
         interactionMode: command.interactionMode,
         ...(command.workspaceStrategy === undefined ? {} : { branch: null, worktreePath: null }),
@@ -9581,6 +9628,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         type: "message.dispatch",
         createdBy: command.createdBy,
         creationSource: command.creationSource,
+        ...withTeamActor(delegatedActor),
         commandId: command.commandId,
         threadId: childThreadId,
         senderThreadId: command.parentThreadId,
@@ -10943,6 +10991,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const requestNode = context.node;
       if (command.feedback !== undefined) {
         const messageId = MessageId.make(`approval-feedback:${command.requestId}`);
+        // teams: the respond command names no sender, so the reply goes to the thread's driver.
+        const feedbackActor = yield* threadDriver(command.threadId);
         // Record the reply for every client without dispatching a prompt to the parent agent.
         yield* emitEvent({
           type: "message.updated",
@@ -10961,6 +11011,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             streaming: false,
             createdBy: "user",
             creationSource: "server",
+            ...withTeamActor(feedbackActor),
             createdAt: now,
             updatedAt: now,
           },
@@ -11000,6 +11051,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             attachments: [],
             createdBy: "user",
             creationSource: "server",
+            ...withTeamActor(feedbackActor),
           },
         });
       }
@@ -11500,6 +11552,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ...(queuedMessage.context ? { context: queuedMessage.context } : {}),
       createdBy: queuedMessage.createdBy,
       creationSource: queuedMessage.creationSource,
+      ...withTeamActor(queuedMessage.actor),
       ...(queuedMessage.scheduledTaskId === undefined
         ? {}
         : { scheduledTaskId: queuedMessage.scheduledTaskId }),
@@ -15089,7 +15142,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         yield* dispatchThreadMutation(command, events, effects);
         break;
       case "thread.metadata.update": {
-        const continuation = metadataUpdateContinuation(command);
+        const unstamped = metadataUpdateContinuation(command);
+        // teams: the agent's own follow-up after a handoff works for its thread's driver.
+        const continuation =
+          unstamped === undefined
+            ? undefined
+            : { ...unstamped, ...withTeamActor(yield* threadDriver(command.threadId)) };
         if (continuation !== undefined) yield* refuseNativeSubagentMessage(command);
         yield* dispatchThreadMutation(command, events, effects);
         if (continuation !== undefined) {
@@ -16405,6 +16463,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         .getThreadShell(threadId)
         .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
     }),
+    getThreadDriver: threadDriver, // teams
     findGuestShareThreadId: Effect.fn("OrchestratorV2.findGuestShareThreadId")(function (shareId) {
       return projectionStore
         .findGuestShareThreadId(shareId)

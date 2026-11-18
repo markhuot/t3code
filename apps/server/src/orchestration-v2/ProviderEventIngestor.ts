@@ -42,6 +42,7 @@ import { makeProviderFailureTurnItem } from "@t3tools/provider-core/server/failu
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import { stripUnservedToolOutputImageBytes } from "./toolOutputImageBytes.ts";
 import { boundFileChangeForStorage } from "./WireProjection.ts";
+import { withParentDriver } from "./teamsActor.ts";
 
 export class ProviderEventNormalizeError extends Schema.TaggedError<ProviderEventNormalizeError>()(
   "ProviderEventNormalizeError",
@@ -470,12 +471,16 @@ export const layer: Layer.Layer<
         function* (input) {
           switch (input.event.type) {
             case "app_thread.created": {
-              const offered = input.event.appThread;
-              const existing = yield* projections.getThread(offered.id).pipe(
+              const existing = yield* projections.getThread(input.event.appThread.id).pipe(
                 Effect.catchTags({
                   ProjectionStoreThreadNotFoundError: () => Effect.succeed(null),
                 }),
               );
+              // teams: a provider's subagent works for its parent's driver, not the parent's starter.
+              const offered =
+                existing === null
+                  ? yield* withParentDriver(projections, input.event.appThread)
+                  : input.event.appThread;
               if (
                 existing !== null &&
                 (input.event.createOnly === true ||

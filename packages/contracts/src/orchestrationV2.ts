@@ -42,6 +42,8 @@ import {
   TurnItemId,
 } from "./baseSchemas.ts";
 import { AuthMcpClientAccess } from "./auth.ts";
+// teams
+import { TeamActor } from "./teams.ts";
 import { ChatAttachment } from "./chatAttachment.ts";
 import { ThreadGuestShare } from "./guestShare.ts";
 import { StoredThreadTags, ThreadTag } from "./threadTags.ts";
@@ -106,6 +108,8 @@ export type OrchestrationV2ThreadHistoryOrigin = typeof OrchestrationV2ThreadHis
 const OrchestrationV2CreationFields = {
   createdBy: OrchestrationV2Actor,
   creationSource: OrchestrationV2CreationSource,
+  /** teams: the person who sent it, or on whose behalf an agent did. Only the server sets it. */
+  actor: Schema.optional(TeamActor),
 } as const;
 
 /**

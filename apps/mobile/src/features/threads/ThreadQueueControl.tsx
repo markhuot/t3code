@@ -28,6 +28,8 @@ import * as Dialog from "../../components/ui/Dialog";
 import { FilePreviewModal, type FilePreviewSource } from "../../components/ui/FilePreviewModal";
 import { SheetHeader } from "../../components/ui/SheetHeader";
 import { AppText as Text } from "../../components/ui/AppText";
+import { teamActorAttribution } from "@t3tools/client-runtime/team-actor";
+import { TeamActorLabel } from "../teams/TeamActorLabel";
 import { SymbolView } from "../../components/ui/AppSymbol";
 import { Menu } from "../../components/ui/Menu";
 import { ScreenContent } from "../../components/ui/ScreenContent";
@@ -101,7 +103,15 @@ function QueuedRunSender(props: {
         : attribution === "t3code"
           ? { icon: null, label: "Sent by T3 Code" }
           : null;
-  if (sender === null) return null;
+  const teamLabel =
+    teamActorAttribution(props.message) === null ? null : (
+      <TeamActorLabel
+        createdBy={props.message.createdBy}
+        actor={props.message.actor}
+        className="min-w-0 shrink font-t3-medium text-2xs text-foreground-muted"
+      />
+    );
+  if (sender === null) return teamLabel;
   return (
     <View className="flex-row items-center gap-1">
       {sender.icon ? (
@@ -119,6 +129,8 @@ function QueuedRunSender(props: {
       >
         {sender.label}
       </Text>
+      {teamLabel ? <Text className="text-2xs text-foreground-muted">·</Text> : null}
+      {teamLabel}
     </View>
   );
 }

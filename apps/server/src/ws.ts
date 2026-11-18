@@ -64,6 +64,7 @@ import {
   OrchestrationV2GetShellSnapshotError,
   OrchestrationV2GetThreadProjectionError,
   OrchestrationV2ThreadLaunchError,
+  ScheduledTaskError,
   type OrchestrationProjectShell,
   type OrchestrationV2ShellSnapshot,
   type OrchestrationV2ShellStreamItem,
@@ -268,6 +269,8 @@ import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
 import * as VcsProjectConfig from "./vcs/VcsProjectConfig.ts";
 import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
+// teams
+import * as Teams from "./teams/Teams.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
 import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
 import { isNetworkPath } from "@t3tools/shared/path";
@@ -1438,6 +1441,15 @@ export const layerWsRpc = (
     Effect.gen(function* () {
       const currentSessionId = currentSession.sessionId;
       const sql = yield* SqlClient.SqlClient;
+      const teams = yield* Teams.Teams;
+      // teams: read per request, so a rename or removal applies to a socket that is already open.
+      const sessionActor = Teams.requireSessionActor(currentSession).pipe(
+        Effect.provideService(Teams.Teams, teams),
+      );
+      // teams: changing or running a scheduled task works on someone's behalf, so needs a member.
+      const taskActor = sessionActor.pipe(
+        Effect.mapError((cause) => new ScheduledTaskError({ message: cause.message, cause })),
+      );
       const threadManagement = yield* ThreadManagementService.ThreadManagementService;
       const intakeContext = yield* Effect.context<
         | ThreadManagementService.ThreadManagementService
@@ -1805,6 +1817,7 @@ export const layerWsRpc = (
           pairingLinks: serverAuth.listPairingLinks(),
           clientSessions: serverAuth.listClientSessions(currentSessionId),
           connectDevices: serverAuth.listConnectDevices(),
+          teamMembers: teams.listMembers(), // teams
         }).pipe(
           Effect.mapError(
             (error) =>
@@ -2009,13 +2022,20 @@ export const layerWsRpc = (
                 .enqueueCommand(
                   (command.type === "prepared-run.retry"
                     ? threadLaunch.retryPreparation(command)
-                    : ThreadMessageIntake.dispatchCommand(
-                        ThreadManagementService.withCreationProvenance(command, {
-                          createdBy: "user",
-                          creationSource:
-                            "creationSource" in command ? command.creationSource : "web",
-                        }),
-                      )
+                    : Effect.gen(function* () {
+                        // teams: work a person starts carries them; anyone else can't start any.
+                        const actor = Teams.isTeamWorkCommand(command)
+                          ? yield* sessionActor
+                          : undefined;
+                        return yield* ThreadMessageIntake.dispatchCommand(
+                          ThreadManagementService.withCreationProvenance(command, {
+                            createdBy: "user",
+                            creationSource:
+                              "creationSource" in command ? command.creationSource : "web",
+                            ...(actor === undefined ? {} : { actor }),
+                          }),
+                        );
+                      })
                   ).pipe(Effect.provide(intakeContext)),
                 )
                 .pipe(
@@ -2180,49 +2200,55 @@ export const layerWsRpc = (
             Effect.andThen(
               startup
                 .enqueueCommand(
-                  threadLaunch
-                    .checkWorktreeBase({
-                      commandId: input.commandId,
-                      projectId: input.projectId,
-                      workspaceStrategy: input.workspaceStrategy,
-                    })
-                    .pipe(
-                      Effect.andThen(
-                        ThreadMessageIntake.launchThread({
+                  // teams
+                  sessionActor.pipe(
+                    Effect.flatMap((actor) =>
+                      threadLaunch
+                        .checkWorktreeBase({
                           commandId: input.commandId,
-                          ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
-                          ...(input.reuseExistingThread === undefined
-                            ? {}
-                            : { reuseExistingThread: input.reuseExistingThread }),
                           projectId: input.projectId,
-                          title: input.title,
-                          ...(input.generateTitle === undefined
-                            ? {}
-                            : { generateTitle: input.generateTitle }),
-                          modelSelection: input.modelSelection,
-                          runtimeMode: input.runtimeMode,
-                          interactionMode: input.interactionMode,
                           workspaceStrategy: input.workspaceStrategy,
-                          ...(input.initialMessage === undefined
-                            ? {}
-                            : {
-                                initialMessage: {
-                                  ...(input.initialMessage.messageId === undefined
-                                    ? {}
-                                    : { messageId: input.initialMessage.messageId }),
-                                  text: input.initialMessage.text,
-                                  attachments: input.initialMessage.attachments,
-                                  ...(input.initialMessage.context === undefined
-                                    ? {}
-                                    : { context: input.initialMessage.context }),
-                                },
-                              }),
-                          createdBy: "user",
-                          creationSource: input.creationSource ?? "web",
-                        }),
-                      ),
-                      Effect.provide(intakeContext),
+                        })
+                        .pipe(
+                          Effect.andThen(
+                            ThreadMessageIntake.launchThread({
+                              commandId: input.commandId,
+                              ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
+                              ...(input.reuseExistingThread === undefined
+                                ? {}
+                                : { reuseExistingThread: input.reuseExistingThread }),
+                              projectId: input.projectId,
+                              title: input.title,
+                              ...(input.generateTitle === undefined
+                                ? {}
+                                : { generateTitle: input.generateTitle }),
+                              modelSelection: input.modelSelection,
+                              runtimeMode: input.runtimeMode,
+                              interactionMode: input.interactionMode,
+                              workspaceStrategy: input.workspaceStrategy,
+                              ...(input.initialMessage === undefined
+                                ? {}
+                                : {
+                                    initialMessage: {
+                                      ...(input.initialMessage.messageId === undefined
+                                        ? {}
+                                        : { messageId: input.initialMessage.messageId }),
+                                      text: input.initialMessage.text,
+                                      attachments: input.initialMessage.attachments,
+                                      ...(input.initialMessage.context === undefined
+                                        ? {}
+                                        : { context: input.initialMessage.context }),
+                                    },
+                                  }),
+                              createdBy: "user",
+                              creationSource: input.creationSource ?? "web",
+                              actor,
+                            }),
+                          ),
+                          Effect.provide(intakeContext),
+                        ),
                     ),
+                  ),
                 )
                 .pipe(
                   // A resumed launch is a retry of one already counted.
@@ -2248,6 +2274,21 @@ export const layerWsRpc = (
                     projection: projectThreadProjectionForWire(result.projection),
                   })),
                   Effect.catchTags({
+                    // teams: a device paired without a member link can't start threads.
+                    TeamIdentityRequiredError: (cause) =>
+                      new OrchestrationV2ThreadLaunchError({
+                        commandId: input.commandId,
+                        projectId: input.projectId,
+                        message: cause.message,
+                        cause,
+                      }),
+                    TeamsPersistenceError: (cause) =>
+                      new OrchestrationV2ThreadLaunchError({
+                        commandId: input.commandId,
+                        projectId: input.projectId,
+                        message: "Failed to launch thread",
+                        cause,
+                      }),
                     AttachmentClaimError: (cause) =>
                       new OrchestrationV2ThreadLaunchError({
                         commandId: input.commandId,
@@ -2326,21 +2367,27 @@ export const layerWsRpc = (
           providerSessionManager.subscribePromptSuggestion(input.threadId),
         [WS_METHODS.scheduledTasksSubscribe]: (_input) =>
           scheduledTasks.subscribeList().pipe(Stream.map(withVisibleWebhookUrls)),
-        [WS_METHODS.scheduledTasksUpsert]: (input) => scheduledTasks.upsert(input),
+        // teams: a task works for whoever last saved its prompt or target.
+        [WS_METHODS.scheduledTasksUpsert]: (input) =>
+          taskActor.pipe(Effect.flatMap((actor) => scheduledTasks.upsert({ ...input, actor }))),
         [WS_METHODS.scheduledTasksSetEnabled]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
+            Effect.andThen(taskActor), // teams
             Effect.andThen(scheduledTasks.setEnabled(input)),
           ),
         [WS_METHODS.scheduledTasksDelete]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
+            Effect.andThen(taskActor), // teams
             Effect.andThen(scheduledTasks.delete(input)),
           ),
         [WS_METHODS.scheduledTasksRunNow]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
+            Effect.andThen(taskActor), // teams
             Effect.andThen(scheduledTasks.runNow(input)),
           ),
         [WS_METHODS.scheduledTasksRotateWebhookToken]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
+            Effect.andThen(taskActor), // teams
             Effect.andThen(scheduledTasks.rotateWebhookToken(input)),
           ),
         [WS_METHODS.guestShareCreate]: (input) =>
@@ -3517,8 +3564,15 @@ export const layerWsRpc = (
           Stream.unwrap(
             Effect.gen(function* () {
               const liveBuffer = yield* Queue.unbounded<
-                PairingGrantStore.BootstrapCredentialChange | SessionStore.SessionCredentialChange
+                | PairingGrantStore.BootstrapCredentialChange
+                | SessionStore.SessionCredentialChange
+                | Teams.TeamsChange
               >();
+              // teams
+              yield* Effect.forkScoped(
+                Stream.runForEach(teams.streamChanges, (change) => Queue.offer(liveBuffer, change)),
+                { startImmediately: true },
+              );
               // Each store subscribes only when consumed, so start both before the snapshot read.
               yield* Effect.forkScoped(
                 Stream.runForEach(bootstrapCredentials.streamChanges, (change) =>
@@ -3534,14 +3588,21 @@ export const layerWsRpc = (
               );
               const initialSnapshot = yield* loadAuthAccessSnapshot();
               const revisionRef = yield* Ref.make(1);
+              const teamsDecorator = Teams.makeAccessStreamDecorator(teams); // teams
+              teamsDecorator.remember(initialSnapshot.clientSessions);
 
               const liveEvents: Stream.Stream<AuthAccessStreamEvent, AuthAccessStreamError> =
                 Stream.fromQueue(liveBuffer).pipe(
+                  // teams: a new binding only matters to a stream that already shows the session.
+                  Stream.filter(
+                    (change) =>
+                      change.type !== "sessionBound" || teamsDecorator.hasShown(change.sessionId),
+                  ),
                   Stream.mapEffect((change) =>
                     Ref.updateAndGet(revisionRef, (revision) => revision + 1).pipe(
                       Effect.flatMap((revision) =>
                         // Device trust has no incremental event older clients could decode.
-                        change.type === "connectDevicesChanged"
+                        change.type === "connectDevicesChanged" || change.type === "teamsChanged"
                           ? loadAuthAccessSnapshot().pipe(
                               Effect.map((payload): AuthAccessStreamEvent => ({
                                 version: 1,
@@ -3550,12 +3611,26 @@ export const layerWsRpc = (
                                 payload,
                               })),
                             )
-                          : Effect.succeed(
-                              toAuthAccessStreamEvent(change, revision, currentSessionId),
+                          : (change.type === "sessionBound"
+                              ? teamsDecorator.rebound(change.sessionId, revision)
+                              : teamsDecorator.decorate(
+                                  toAuthAccessStreamEvent(change, revision, currentSessionId),
+                                )
+                            ).pipe(
+                              Effect.mapError(
+                                (error: Teams.TeamsPersistenceError) =>
+                                  new AuthAccessStreamError({ message: error.message }),
+                              ),
                             ),
+                      ),
+                      Effect.tap((event) =>
+                        event?.type === "snapshot"
+                          ? Effect.sync(() => teamsDecorator.remember(event.payload.clientSessions))
+                          : Effect.void,
                       ),
                     ),
                   ),
+                  Stream.filter((event) => event !== undefined),
                 );
 
               return Stream.concat(

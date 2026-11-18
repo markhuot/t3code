@@ -172,6 +172,7 @@ import type {
 import { PendingApprovalCard } from "./PendingApprovalCard";
 import { ComposerErrorNotice } from "./ComposerErrorNotice";
 import { ManagedRuntimeModeNotice } from "./ManagedRuntimeModeNotice";
+import { TeamIdentityNotice } from "../teams/TeamIdentityNotice";
 import { FreshSessionNotice } from "./FreshSessionNotice";
 import { ComposerFeedback } from "./ComposerFeedback";
 import { ComposerUsageLimits } from "./ComposerUsageLimits";
@@ -1630,6 +1631,7 @@ function ThreadDetailBody(
                         onDismiss={() => props.onDismissFeedback(submission.id)}
                       />
                     ))}
+                    <TeamIdentityNotice environmentId={props.environmentId} />
                     {freshSessionAvailable ? (
                       <FreshSessionNotice threadKey={selectedThreadKey} />
                     ) : null}

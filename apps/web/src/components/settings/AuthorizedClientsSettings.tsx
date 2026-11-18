@@ -14,6 +14,7 @@ import {
   type AuthPairingCredentialResult,
   type AdvertisedEndpoint,
   type EnvironmentId,
+  type TeamMember,
 } from "@t3tools/contracts";
 import {
   isAtomCommandInterrupted,
@@ -62,6 +63,13 @@ import { ManagedControl } from "../ManagedPolicy";
 import { openUseInAnotherApp } from "../mcp/UseInAnotherAppDialog";
 import { ConnectionStatusDot } from "../ConnectionStatusDot";
 import { ITEM_ROW_CLASSNAME, ITEM_ROW_INNER_CLASSNAME } from "./itemRows";
+import { TeamMemberPicker } from "~/teams/TeamMemberPicker";
+import { TeamMemberSummary } from "~/teams/TeamMemberSummary";
+import {
+  initialTeamMemberChoice,
+  toPairingMemberInput,
+  type TeamMemberChoice,
+} from "~/teams/teamMemberChoice";
 import {
   formatAccessTimestamp,
   selectPairingEndpoint,
@@ -274,6 +282,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
             <h3 className="text-sm font-medium text-foreground">{primaryLabel}</h3>
           </div>
           <p className="text-xs text-muted-foreground">
+            <TeamMemberSummary member={pairingLink.teamMember} />
             <Tooltip>
               <TooltipTrigger render={<span />}>
                 {formatExpiresInLabel(pairingLink.expiresAt, nowMs)}
@@ -530,6 +539,7 @@ const ConnectedClientListRow = memo(function ConnectedClientListRow({
             ) : null}
           </div>
           <p className="text-xs text-muted-foreground">
+            <TeamMemberSummary member={clientSession.teamMember} />
             {deviceInfoBits.length > 0 ? (
               <>
                 {deviceInfoBits.join(" · ")}
@@ -563,6 +573,8 @@ type AuthorizedClientsHeaderActionProps = {
   isRevokingOtherClients: boolean;
   onRevokeOtherClients: () => void;
   delegatableScopes: ReadonlyArray<AuthEnvironmentScope>;
+  /** Undefined when the server has no team members; the link then needs no member. */
+  teamMembers?: ReadonlyArray<TeamMember> | undefined;
 };
 
 export const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderAction({
@@ -572,6 +584,7 @@ export const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHead
   isRevokingOtherClients,
   onRevokeOtherClients,
   delegatableScopes,
+  teamMembers,
 }: AuthorizedClientsHeaderActionProps) {
   const pairingDenial = managedCapabilityDenial(useManagedPolicy(environmentId), "remoteClients");
   const createPairingCredential = useAtomCommand(authEnvironment.createPairingCredential, {
@@ -584,6 +597,11 @@ export const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHead
   ]);
   const selectedScopes = pairingScopes.filter((scope) => delegatableScopes.includes(scope));
   const [isCreatingPairingLink, setIsCreatingPairingLink] = useState(false);
+  const [memberChoice, setMemberChoice] = useState<TeamMemberChoice | null>(
+    initialTeamMemberChoice(teamMembers ?? []),
+  );
+  const teamMember = toPairingMemberInput(memberChoice, teamMembers ?? []);
+  const needsTeamMember = teamMembers !== undefined && teamMember === null;
 
   const handleCreatePairingLink = async () => {
     if (
@@ -596,11 +614,16 @@ export const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHead
     const trimmedLabel = pairingLabel.trim();
     const result = await createPairingCredential({
       environmentId,
-      input: { ...(trimmedLabel ? { label: trimmedLabel } : {}), scopes: selectedScopes },
+      input: {
+        ...(trimmedLabel ? { label: trimmedLabel } : {}),
+        scopes: selectedScopes,
+        ...(teamMember === null ? {} : { teamMember }),
+      },
     });
     if (result._tag === "Success") {
       onPairingLinkCreated(result.value);
       setPairingLabel("");
+      setMemberChoice(initialTeamMemberChoice(teamMembers ?? []));
       setPairingScopes(
         AuthStandardClientScopes.filter((scope) => delegatableScopes.includes(scope)),
       );
@@ -649,6 +672,8 @@ export const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHead
         open={dialogOpen && pairingDenial === undefined}
         onOpenChange={(open) => {
           setDialogOpen(open);
+          // teams: start from the current member list; Cancel closes without passing through here.
+          if (open) setMemberChoice(initialTeamMemberChoice(teamMembers ?? []));
           if (!open) {
             setPairingLabel("");
             setPairingScopes(
@@ -688,6 +713,14 @@ export const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHead
                 autoFocus
               />
             </label>
+            {teamMembers === undefined ? null : (
+              <TeamMemberPicker
+                members={teamMembers}
+                choice={memberChoice}
+                onChange={setMemberChoice}
+                disabled={isCreatingPairingLink}
+              />
+            )}
             <section className="space-y-3">
               <div className="flex items-center justify-between gap-3">
                 <div>
@@ -771,7 +804,7 @@ export const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHead
               Cancel
             </Button>
             <Button
-              disabled={isCreatingPairingLink || selectedScopes.length === 0}
+              disabled={isCreatingPairingLink || selectedScopes.length === 0 || needsTeamMember}
               onClick={() => void handleCreatePairingLink()}
             >
               {isCreatingPairingLink ? "Creating…" : "Create link"}

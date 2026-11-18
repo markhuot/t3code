@@ -138,6 +138,7 @@ import { assertTargetWithinLimits, isLiveCallerShell, threadNotFound } from "./t
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
+import { withTeamActor } from "../orchestration-v2/teamsActor.ts";
 
 // Return recoverable handles before common MCP client timeouts expire.
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
@@ -1311,6 +1312,19 @@ const make = Effect.gen(function* () {
           ),
         );
 
+  // teams
+  const loadThreadDriver = (threadId: ThreadId) =>
+    threadManagement
+      .getThreadDriver(threadId)
+      .pipe(
+        Effect.mapError((error) =>
+          failure(
+            "orchestration_error",
+            `Unable to read thread ${threadId}: ${errorMessage(error)}`,
+          ),
+        ),
+      );
+
   const loadThreadRecords = <K extends ProjectionRecordField>(
     threadId: ThreadId,
     fields: ReadonlyArray<K>,
@@ -2307,8 +2321,10 @@ const make = Effect.gen(function* () {
               }),
             }),
       };
+      // teams: an agent's task works for whom the calling thread works for.
+      const actor = parent === undefined ? undefined : yield* loadThreadDriver(parent.thread.id);
       const { task } = yield* scheduledTasks
-        .upsert(upsertInput)
+        .upsert({ ...upsertInput, ...withTeamActor(actor) })
         .pipe(
           Effect.mapError((error) =>
             failure("orchestration_error", `Could not schedule task: ${error.message}`),
@@ -3142,6 +3158,10 @@ const make = Effect.gen(function* () {
                     ? {}
                     : { linkOrigin: parent.thread.linkOrigin }),
                   ...(initialMessage === undefined ? {} : { initialMessage }),
+                  // teams: a prompt names its sender thread; without one, name the driver here.
+                  ...(initialMessage === undefined
+                    ? withTeamActor(yield* loadThreadDriver(scope.thread.threadId))
+                    : {}),
                 })
                 .pipe(
                   Effect.mapError((error) =>

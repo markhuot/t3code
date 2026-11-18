@@ -86,6 +86,7 @@ export function formatPairingCredentialList(
         scopes: credential.permissions ?? credential.scopes,
         createdAt: toIsoString(credential.createdAt),
         expiresAt: toIsoString(credential.expiresAt),
+        ...(credential.teamMember ? { teamMember: credential.teamMember } : {}), // teams
       })),
       null,
       2,

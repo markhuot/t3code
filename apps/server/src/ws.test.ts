@@ -26,7 +26,9 @@ import {
   ProviderInstanceId,
   ProviderThreadId,
   RunId,
+  ScheduledTaskError,
   SourceControlRepositoryError,
+  TEAM_IDENTITY_REQUIRED_MESSAGE,
   WS_METHODS,
   WsRpcGroup,
   WsServerRefreshProvidersRpc,
@@ -43,6 +45,7 @@ import {
 } from "@t3tools/contracts";
 import { SOCKET_FRAME_PARTS_QUERY_PARAM } from "@t3tools/shared/socketFrameParts";
 import * as Deferred from "effect/Deferred";
+import * as Ref from "effect/Ref";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -169,6 +172,7 @@ import * as LegacyV1ThreadImporter from "./orchestration-v2/legacy/LegacyV1Threa
 import * as ThreadCommandExecutor from "./orchestration-v2/ThreadCommandExecutor.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { projectIdentitiesDigest } from "./orchestration-v2/ShellStream.ts";
+import * as Teams from "./teams/Teams.ts";
 import * as OrchestrationEventStore from "./persistence/OrchestrationEventStore.ts";
 import * as SqlitePersistence from "./persistence/Sqlite.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
@@ -182,6 +186,14 @@ import {
   WS_RPC_SERVER_OPTIONS,
   withLateConfigDiscovery,
 } from "./ws.ts";
+
+const layerTeamsTest = Layer.mock(Teams.Teams)({
+  listMembers: () => Effect.succeed([]),
+  streamChanges: Stream.never,
+  withClientSessionMembers: (clientSessions) => Effect.succeed(clientSessions),
+  withPairingLinkMembers: (links) => Effect.succeed(links),
+  resolveActor: () => Effect.undefined,
+});
 
 const snapshotConfig = (fields: Partial<ServerConfig>) =>
   ({ availableEditors: [], settings: {}, ...fields }) as unknown as ServerConfig;
@@ -923,6 +935,7 @@ it.live.each([
         Layer.mock(ServerBrowser.ServerBrowser)({
           profileReporter: Effect.succeed(() => Effect.void),
         }),
+        layerTeamsTest,
         Layer.mock(EnvironmentAuth.EnvironmentAuth)({
           authenticateWebSocketUpgrade: () =>
             Effect.succeed({
@@ -1096,6 +1109,7 @@ it.effect.each([
             capabilities: { repositoryIdentity: false },
           }),
         }),
+        layerTeamsTest,
         Layer.mock(EnvironmentAuth.EnvironmentAuth)({
           getDescriptor: () =>
             Effect.succeed({
@@ -1312,6 +1326,7 @@ it.effect("access changes made while the snapshot loads reach the client after i
               }),
               Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
               Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+              layerTeamsTest,
               Layer.mock(EnvironmentAuth.EnvironmentAuth)({
                 listPairingLinks: () => Effect.succeed([]),
                 listConnectDevices: () => Effect.succeed([]),
@@ -1368,7 +1383,7 @@ it.effect("access changes made while the snapshot loads reach the client after i
       version: 1,
       revision: 4,
       type: "snapshot",
-      payload: { pairingLinks: [], clientSessions: [], connectDevices: [] },
+      payload: { pairingLinks: [], clientSessions: [], connectDevices: [], teamMembers: [] },
     });
     yield* server.write(0, { _tag: "Interrupt", requestId, interruptors: [] });
   }).pipe(
@@ -1477,6 +1492,7 @@ it.effect("on-demand clients get provider config without workspace snapshots", (
           capabilities: { repositoryIdentity: false },
         }),
       }),
+      layerTeamsTest,
       Layer.mock(EnvironmentAuth.EnvironmentAuth)({
         getDescriptor: () =>
           Effect.succeed({
@@ -1848,6 +1864,7 @@ it.effect("a missing thread worktree gets its project's skills in the cwd snapsh
       }),
       Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
       Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+      layerTeamsTest,
       Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
     );
     const server = yield* RpcServer.makeNoSerialization(
@@ -1934,6 +1951,7 @@ it.effect("a git action that fails partway still refreshes the repository status
       Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/unused" }),
       Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
       Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+      layerTeamsTest,
       Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
     );
     const server = yield* RpcServer.makeNoSerialization(WsRpcGroup, {
@@ -1980,6 +1998,73 @@ it.effect("a git action that fails partway still refreshes the repository status
   ),
 );
 
+it.effect("a session that is no team member can't run a scheduled task", () =>
+  Effect.gen(function* () {
+    const runs = yield* Ref.make(0);
+    const exits = yield* Queue.unbounded<Exit.Exit<unknown, unknown>>();
+    const services = Layer.mergeAll(
+      layerUnusedConfigRpcServices,
+      Layer.mock(ScheduledTasks.ScheduledTaskService)({
+        runNow: () => Ref.update(runs, (count) => count + 1).pipe(Effect.as({} as never)),
+      }),
+      Layer.mock(ExternalLauncher.ExternalLauncher)({}),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+      Layer.mock(UsageLimitSources.UsageLimitSources)({}),
+      Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
+      Layer.mock(DirectEndpoints.DirectEndpoints)({}),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/unused" }),
+      Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
+      Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+      layerTeamsTest,
+      Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
+    );
+    const server = yield* RpcServer.makeNoSerialization(WsRpcGroup, {
+      ...WS_RPC_SERVER_OPTIONS,
+      onFromServer: (response) =>
+        response._tag === "Exit" ? Queue.offer(exits, response.exit) : Effect.void,
+    }).pipe(
+      Effect.provide(
+        layerWsRpc(
+          {
+            sessionId: AuthSessionId.make("unbound-device"),
+            subject: "one-time-token",
+            method: "browser-session-cookie",
+            scopes: [AuthOrchestrationOperateScope],
+          },
+          {},
+          yield* ServerBrowser.ServerBrowser,
+          () => Effect.void,
+          { secretReferences: true },
+        ).pipe(
+          Layer.provide(services),
+          Layer.merge(RpcAuthorization.layer([AuthOrchestrationOperateScope])),
+        ),
+      ),
+    );
+    yield* server.write(0, {
+      _tag: "Request",
+      id: RpcMessage.RequestId("run-now"),
+      tag: WS_METHODS.scheduledTasksRunNow,
+      payload: { id: "scheduled-task:someone-elses" },
+      headers: Headers.empty,
+    });
+    const exit = yield* Queue.take(exits);
+    assert.isTrue(Exit.isFailure(exit));
+    const cause = Exit.isFailure(exit) ? Cause.squash(exit.cause) : undefined;
+    assert.instanceOf(cause, ScheduledTaskError);
+    assert.equal((cause as ScheduledTaskError).message, TEAM_IDENTITY_REQUIRED_MESSAGE);
+    assert.equal(yield* Ref.get(runs), 0);
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.fresh(layerConfigSources),
+        Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+        Layer.mock(ServerBrowser.ServerBrowser)({}),
+      ),
+    ),
+  ),
+);
+
 it.effect("a publish whose push fails still refreshes the new remote", () =>
   Effect.gen(function* () {
     const refreshes = yield* Queue.unbounded<string>();
@@ -2014,6 +2099,7 @@ it.effect("a publish whose push fails still refreshes the new remote", () =>
       Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/unused" }),
       Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
       Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+      layerTeamsTest,
       Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
     );
     const server = yield* RpcServer.makeNoSerialization(WsRpcGroup, {
@@ -2514,6 +2600,7 @@ it.effect("ACP session RPCs list a thread missing its history and repair it on i
       Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/unused" }),
       Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
       Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+      layerTeamsTest,
       Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
       Layer.mock(ProjectService.ProjectService)({
         getById: () =>

@@ -85,6 +85,7 @@ import { markdownProseDirection } from "~/textDirection";
 import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { formatChatTimestampTooltip, formatDayAwareTimestamp } from "../../timestampFormat";
 import { WorkflowOpeningBlock } from "./WorkflowOpeningBlock";
+import { TeamActorLabel } from "~/teams/TeamActorLabel";
 import { useTallEnoughToFold } from "./useTallEnoughToFold";
 import { TimelineRowCtx, TimelineRowActivityCtx, type TimelineRow } from "./timelineRowContext";
 import {
@@ -301,6 +302,7 @@ function AutomationMessageRow({ row }: { row: Extract<TimelineRow, { kind: "mess
 
   return (
     <div className="group flex flex-col items-end gap-1" data-user-message-attribution="automation">
+      <TeamActorLabel message={row.message} />
       {row.message.inputIntent === "steer" ||
       row.message.inputIntent === "promoted_queued_to_steer" ? (
         <UserMessageIntentMarker
@@ -879,6 +881,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           Sent by T3 Code
         </p>
       ) : null}
+      <TeamActorLabel message={row.message} />
       {/* The row's heading already names the guest for screen readers. */}
       {userMessage.guestName !== undefined ? (
         <div aria-hidden>

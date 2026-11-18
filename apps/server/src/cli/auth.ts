@@ -8,6 +8,7 @@ import * as Schema from "effect/Schema";
 import { Argument, Command, Flag, GlobalFlag } from "effect/cli";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import { pairingLinkTeamMember, teamMemberFlags } from "../teams/cliFlags.ts"; // teams
 
 import {
   formatConnectDeviceList,
@@ -95,6 +96,7 @@ const pairingCreateCommand = Command.make("create", {
   label: labelFlag,
   baseUrl: baseUrlFlag,
   json: jsonFlag,
+  ...teamMemberFlags, // teams
 }).pipe(
   Command.withDescription("Issue a new client pairing token."),
   Command.withHandler((flags) =>
@@ -107,6 +109,7 @@ const pairingCreateCommand = Command.make("create", {
             subject: "one-time-token",
             ...(Option.isSome(flags.ttl) ? { ttl: flags.ttl.value } : {}),
             ...(Option.isSome(flags.label) ? { label: flags.label.value } : {}),
+            ...pairingLinkTeamMember(flags), // teams
           });
           const output = formatIssuedPairingCredential(issued, {
             json: flags.json,

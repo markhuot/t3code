@@ -24,6 +24,7 @@ import {
   type ScheduledTaskSetEnabledInput,
   type ScheduledTaskThreadMode,
   type ScheduledTaskUpsertInput,
+  type TeamActor,
   managedPolicyDeniedMessage,
   scheduledTaskThreadMode,
   managedRuntimeModeDenial,
@@ -78,6 +79,17 @@ import {
 } from "./webhookDedupe.ts";
 import { describeFailedWebhookFilter, findFailedWebhookFilter } from "./webhookFilter.ts";
 import { constantTimeEquals, verifyWebhookSignature } from "./webhookVerification.ts";
+import { withTeamActor } from "../orchestration-v2/teamsActor.ts";
+import {
+  applyScheduledTaskActorWrite,
+  clearScheduledTaskActor,
+  isScheduledTaskActorRemoved,
+  pauseScheduledTaskOfRemovedActor,
+  readScheduledTaskActors,
+  REMOVED_ACTOR_MESSAGE,
+  scheduledTaskActorWrite,
+  withScheduledTaskActor,
+} from "./teamsScheduledTaskActor.ts";
 
 export const WEBHOOK_ROUTE_PREFIX = "/api/hooks";
 const isScheduledTaskError = Schema.is(ScheduledTaskError);
@@ -260,7 +272,8 @@ export class ScheduledTaskService extends Context.Service<
     readonly list: () => Effect.Effect<ScheduledTaskListResult, ScheduledTaskError>;
     readonly subscribeList: () => Stream.Stream<ScheduledTaskListResult, ScheduledTaskError>;
     readonly upsert: (
-      input: ScheduledTaskUpsertInput,
+      /** teams: `actor` is who is saving it (see `scheduledTaskActorWrite`); not part of the wire input. */
+      input: ScheduledTaskUpsertInput & { readonly actor?: TeamActor | undefined },
     ) => Effect.Effect<ScheduledTaskMutationResult, ScheduledTaskError>;
     readonly setEnabled: (
       input: ScheduledTaskSetEnabledInput,
@@ -556,9 +569,13 @@ export const layer = Layer.effect(
     const listRows = Effect.fn("ScheduledTaskService.listRows")(function* () {
       const rows = yield* selectAllRows();
       const origin = yield* readWebhookOrigin;
+      const actors = yield* readScheduledTaskActors(sql).pipe(NodeSqliteClient.readOnly); // teams
       return yield* Effect.forEach(
         rows,
-        (row) => decodeRow(row, origin).pipe(Effect.map(withPolicy)),
+        (row) =>
+          decodeRow(row, origin).pipe(
+            Effect.map((task) => withPolicy(withScheduledTaskActor(task, actors))),
+          ),
         { concurrency: 1 },
       );
     });
@@ -601,7 +618,16 @@ export const layer = Layer.effect(
       );
       const row = rows[0];
       if (row === undefined) return null;
-      return withPolicy(yield* decodeRow(row, yield* readWebhookOrigin));
+      // teams
+      const actors = yield* readScheduledTaskActors(sql, [id]).pipe(
+        NodeSqliteClient.readOnly,
+        Effect.mapError((cause) =>
+          taskError("Could not load schedule task.", { taskId: id, cause }),
+        ),
+      );
+      return withPolicy(
+        withScheduledTaskActor(yield* decodeRow(row, yield* readWebhookOrigin), actors),
+      );
     });
 
     const findWebhookCredentials = (id: ScheduledTaskId) =>
@@ -754,6 +780,7 @@ export const layer = Layer.effect(
         .withTransaction(
           sql`DELETE FROM scheduled_task_webhook_deliveries WHERE task_id = ${id}`.pipe(
             Effect.andThen(sql`DELETE FROM scheduled_tasks WHERE task_id = ${id}`),
+            Effect.andThen(clearScheduledTaskActor(sql, id)), // teams
           ),
         )
         .pipe(
@@ -1011,6 +1038,32 @@ export const layer = Layer.effect(
           if (reason !== null) return yield* new WebhookDeliverySkipped({ reason });
         }
 
+        // teams: a removed member's task is paused rather than run on their behalf.
+        if (
+          yield* isScheduledTaskActorRemoved(sql, active.actor).pipe(
+            Effect.mapError((cause) =>
+              taskError("Could not load schedule task.", { taskId: active.id, cause }),
+            ),
+          )
+        ) {
+          if (trigger === "manual")
+            return yield* taskError(REMOVED_ACTOR_MESSAGE, { taskId: active.id });
+          yield* pauseScheduledTaskOfRemovedActor(sql, active.id, startedAtIso).pipe(
+            Effect.mapError((cause) =>
+              taskError("Could not update schedule task.", { taskId: active.id, cause }),
+            ),
+          );
+          yield* Effect.logWarning(REMOVED_ACTOR_MESSAGE, { taskId: active.id });
+          yield* notifyChanged;
+          if (webhook !== undefined)
+            return yield* new WebhookDeliverySkipped({ reason: REMOVED_ACTOR_MESSAGE });
+          return {
+            task: { ...active, enabled: false, nextRunAt: null },
+            threadId: null,
+            dispatchFailed: false,
+          };
+        }
+
         if (webhook === undefined) yield* markRunning(active.id, startedAtIso);
         else
           yield* sql
@@ -1058,6 +1111,7 @@ export const layer = Layer.effect(
               ...(threadMode === "fresh_session" ? { freshContext: true } : {}),
               createdBy: active.createdBy,
               creationSource: active.creationSource,
+              ...withTeamActor(active.actor),
             })
             .pipe(
               Effect.catchTags({
@@ -1096,6 +1150,7 @@ export const layer = Layer.effect(
                     },
                     createdBy: active.createdBy,
                     creationSource: active.creationSource,
+                    ...withTeamActor(active.actor),
                   })
                   .pipe(
                     Effect.map((launched) => launched.threadId),
@@ -1567,12 +1622,28 @@ export const layer = Layer.effect(
         lastRunError: existingTask?.lastRunError ?? null,
         runCount: existingTask?.runCount ?? 0,
       };
-      yield* saveTask(
-        task,
-        input.requireExisting === true,
-        scheduleUnchanged ? existingTask.schedule : null,
-        webhook,
+      // teams: whom the task works for is written with it, so a save never lands without it.
+      const actorWrite = yield* scheduledTaskActorWrite(sql, existingTask, task, input.actor).pipe(
+        Effect.mapError((cause) =>
+          taskError("Could not save schedule task.", { taskId: id, cause }),
+        ),
       );
+      yield* sql
+        .withTransaction(
+          saveTask(
+            task,
+            input.requireExisting === true,
+            scheduleUnchanged ? existingTask.schedule : null,
+            webhook,
+          ).pipe(Effect.andThen(applyScheduledTaskActorWrite(sql, id, actorWrite))),
+        )
+        .pipe(
+          Effect.mapError((cause) =>
+            isScheduledTaskError(cause)
+              ? cause
+              : taskError("Could not save schedule task.", { taskId: id, cause }),
+          ),
+        );
       yield* notifyChanged;
       return { task: (yield* findTask(id)) ?? task };
     });

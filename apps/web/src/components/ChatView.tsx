@@ -337,6 +337,7 @@ import { useProactivePanels } from "../hooks/useProactivePanels";
 import { useIncrementalTimelineEntries } from "../hooks/useIncrementalTimelineEntries";
 import { useRightPanelSurfaceClose } from "../hooks/useRightPanelSurfaceClose";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
+import { useTeamIdentityBanner } from "~/teams/useTeamIdentityBanner";
 import { modelFallbackBannerItem } from "./chat/ComposerUsageLimits";
 import { ComposerSurface } from "./chat/ComposerSurface";
 import { resolveThreadSyncPhase } from "../threadSync";
@@ -1345,6 +1346,7 @@ export default function ChatView(props: ChatViewProps) {
     automaticEnvironment,
     autoUpdateEnvironments,
   });
+  const teamIdentityItems = useTeamIdentityBanner(activeThread?.environmentId ?? null);
   const providerInstanceEntries = providerInstanceEntriesFor(
     providerStatuses,
     settings,
@@ -2676,6 +2678,7 @@ export default function ChatView(props: ChatViewProps) {
         ...projectCloneItems,
         ...freshSessionItems,
         ...systemComposerBannerItems,
+        ...teamIdentityItems,
       ];
     }
     return [
@@ -2687,6 +2690,7 @@ export default function ChatView(props: ChatViewProps) {
       ...projectCloneItems,
       ...freshSessionItems,
       ...systemComposerBannerItems,
+      ...teamIdentityItems,
       branchMismatchBannerItem({
         mismatchKey: activeBranchMismatchKey,
         mismatch: localCheckoutBranchMismatch,

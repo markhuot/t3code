@@ -166,6 +166,70 @@ it.effect("sets the selected browser session cookies through the HTTP route", ()
           expect(restrictedCookies).toHaveLength(1);
           expect(restrictedCookies[0]).toMatch(/^t3_session_/);
           expect(restrictedCookies[0]).not.toContain("t3_dev_session_");
+
+          // teams: the host binds links to members; a member can't mint one to become someone else.
+          const memberLinkResponse = await environmentA.handler(
+            postJson(
+              "/api/auth/pairing-token",
+              { teamMember: { name: "Sam" } },
+              { cookie: devCookieHeader },
+            ),
+            requestContext,
+          );
+          expect(memberLinkResponse.status).toBe(200);
+          const memberLink = (await memberLinkResponse.json()) as { credential: string };
+          const samResponse = await environmentA.handler(
+            postJson("/api/auth/browser-session", { credential: memberLink.credential }),
+            requestContext,
+          );
+          const samCookie = samResponse.headers.getSetCookie()[0]?.split(";", 1)[0] ?? "";
+          const impersonation = await environmentA.handler(
+            postJson(
+              "/api/auth/pairing-token",
+              { teamMember: { name: "Mallory" } },
+              { cookie: samCookie },
+            ),
+            requestContext,
+          );
+          expect(impersonation.status).toBe(403);
+          expect(await impersonation.json()).toMatchObject({ reason: "team_owner_required" });
+          const samMembers = await environmentA.handler(
+            postJson(
+              "/api/auth/team-members/remove",
+              { memberId: "anyone" },
+              { cookie: samCookie },
+            ),
+            requestContext,
+          );
+          expect(samMembers.status).toBe(403);
+
+          // A device paired with a link naming no one can't change who has access.
+          const plainLinkResponse = await environmentA.handler(
+            postJson("/api/auth/pairing-token", {}, { cookie: devCookieHeader }),
+            requestContext,
+          );
+          const plainLink = (await plainLinkResponse.json()) as { credential: string };
+          const strangerResponse = await environmentA.handler(
+            postJson("/api/auth/browser-session", { credential: plainLink.credential }),
+            requestContext,
+          );
+          const strangerCookie = strangerResponse.headers.getSetCookie()[0]?.split(";", 1)[0] ?? "";
+          const strangerRevoke = await environmentA.handler(
+            postJson("/api/auth/clients/revoke-others", {}, { cookie: strangerCookie }),
+            requestContext,
+          );
+          expect(strangerRevoke.status).toBe(403);
+          expect(await strangerRevoke.json()).toMatchObject({ reason: "team_identity_required" });
+          // A member can.
+          const samLinkRevoke = await environmentA.handler(
+            postJson(
+              "/api/auth/pairing-links/revoke",
+              { id: "no-such-link" },
+              { cookie: samCookie },
+            ),
+            requestContext,
+          );
+          expect(samLinkRevoke.status).toBe(200);
         }),
       ([environmentA, environmentB]) =>
         Effect.promise(() => Promise.all([environmentA.dispose(), environmentB.dispose()])),

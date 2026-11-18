@@ -190,6 +190,8 @@ import {
 } from "../../native/SelectableMarkdownText";
 
 import { AppText as Text } from "../../components/ui/AppText";
+import { teamActorAttribution } from "@t3tools/client-runtime/team-actor";
+import { TeamActorLabel } from "../teams/TeamActorLabel";
 import { VideoPreviewModal, type VideoPreviewSource } from "../../components/ui/VideoPreviewModal";
 import { markdownFileEmbedLabel, resolveMarkdownMediaPreview } from "../../lib/markdownMedia";
 import {
@@ -2422,6 +2424,19 @@ function renderFeedEntry(
                   senderThreadId={senderRef.threadId}
                   linked={message.linkedSender !== undefined}
                 />
+              ) : null}
+              {isUser && teamActorAttribution(message) !== null ? (
+                <>
+                  <TeamActorLabel createdBy={message.createdBy} actor={message.actor} />
+                  <Text
+                    accessible={false}
+                    accessibilityElementsHidden
+                    importantForAccessibility="no"
+                    className="font-t3-medium text-xs text-foreground-secondary"
+                  >
+                    ·
+                  </Text>
+                </>
               ) : null}
               {intentBadge ? (
                 <View

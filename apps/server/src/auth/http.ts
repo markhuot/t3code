@@ -11,6 +11,7 @@ import {
   EnvironmentInternalError,
   type EnvironmentInternalErrorReason,
   EnvironmentOperationForbiddenError,
+  type EnvironmentOperationForbiddenReason, // teams
   EnvironmentRequestInvalidError,
   type EnvironmentRequestInvalidReason,
   EnvironmentResourceNotFoundError,
@@ -36,6 +37,7 @@ import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import * as SessionStore from "./SessionStore.ts";
+import * as Teams from "../teams/Teams.ts"; // teams
 import { traceAuthenticatedRelayRequest, traceRelayRequest } from "../cloud/traceRelayRequest.ts";
 import { deriveAuthClientMetadata } from "./utils.ts";
 import { checkRequestDpopProof } from "./dpop.ts";
@@ -137,7 +139,7 @@ export function failEnvironmentScopeRequired(requiredScope: AuthEnvironmentScope
   );
 }
 
-function failEnvironmentOperationForbidden(reason: "current_session_revoke_not_allowed") {
+function failEnvironmentOperationForbidden(reason: EnvironmentOperationForbiddenReason) {
   return currentEnvironmentTraceId.pipe(
     Effect.flatMap((traceId) =>
       Effect.fail(
@@ -279,6 +281,30 @@ export const layer = HttpApiBuilder.group(
   Effect.fnUntraced(function* (handlers) {
     const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
     const sessions = yield* SessionStore.SessionStore;
+    // teams: who a session is decides whether it may manage access.
+    const teams = yield* Teams.Teams;
+    const requireTeamOwner = (session: Teams.TeamSessionIdentity) =>
+      Teams.isOwnerSession(session).pipe(
+        Effect.provideService(Teams.Teams, teams),
+        Effect.flatMap((owner) =>
+          owner ? Effect.void : failEnvironmentOperationForbidden("team_owner_required"),
+        ),
+      );
+    // On a teams server every session is someone; one that isn't can't change who has access.
+    const requireAccessWriteMember = Effect.fn("environment.auth.requireAccessWriteMember")(
+      function* () {
+        const session = yield* requireEnvironmentScope(AuthAccessWriteScope);
+        yield* Teams.requireSessionActor(session).pipe(
+          Effect.provideService(Teams.Teams, teams),
+          Effect.catchTags({
+            TeamIdentityRequiredError: () =>
+              failEnvironmentOperationForbidden("team_identity_required"),
+            TeamsPersistenceError: (error) => failEnvironmentInternal("internal_error", error),
+          }),
+        );
+        return session;
+      },
+    );
 
     return handlers
       .handle(
@@ -477,7 +503,7 @@ export const layer = HttpApiBuilder.group(
         Effect.fn("environment.auth.pairingCredential")(
           function* (args) {
             yield* annotateEnvironmentRequest(args.endpoint.name);
-            const session = yield* requireEnvironmentScope(AuthAccessWriteScope);
+            const session = yield* requireAccessWriteMember(); // teams
             const delegatedScopes = args.payload.access
               ? mcpClientScopes(args.payload.access)
               : (args.payload.scopes ?? AuthStandardClientScopes);
@@ -492,6 +518,8 @@ export const layer = HttpApiBuilder.group(
                 return yield* failEnvironmentScopeRequired(delegatedScope);
               }
             }
+            // teams
+            if (args.payload.teamMember !== undefined) yield* requireTeamOwner(session);
             return yield* serverAuth.issuePairingCredential(args.payload);
           },
           Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
@@ -500,6 +528,10 @@ export const layer = HttpApiBuilder.group(
           Effect.catchTags({
             ManagedPolicyRefusedError: (error) =>
               Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
+            // teams: a link can name a member who doesn't exist, and member storage can fail.
+            TeamMemberNotFoundError: () => failEnvironmentInvalidRequest("team_member_not_found"),
+            TeamsPersistenceError: (error) =>
+              failEnvironmentInternal("pairing_credential_issuance_failed", error),
           }),
         ),
       )
@@ -508,7 +540,7 @@ export const layer = HttpApiBuilder.group(
         Effect.fn("environment.auth.revokePairingLink")(
           function* (args) {
             yield* annotateEnvironmentRequest(args.endpoint.name);
-            yield* requireEnvironmentScope(AuthAccessWriteScope);
+            yield* requireAccessWriteMember(); // teams
             const revoked = yield* serverAuth.revokePairingLink(args.payload.id);
             return { revoked };
           },
@@ -518,11 +550,43 @@ export const layer = HttpApiBuilder.group(
         ),
       )
       .handle(
+        "updateTeamMember", // teams
+        Effect.fn("environment.auth.updateTeamMember")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            yield* requireTeamOwner(yield* requireAccessWriteMember());
+            return yield* teams.updateMember(args.payload);
+          },
+          Effect.catchTags({
+            TeamMemberNotFoundError: () => failEnvironmentInvalidRequest("team_member_not_found"),
+            TeamsPersistenceError: (error) => failEnvironmentInternal("internal_error", error),
+          }),
+        ),
+      )
+      .handle(
+        "removeTeamMember",
+        Effect.fn("environment.auth.removeTeamMember")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            yield* requireTeamOwner(yield* requireAccessWriteMember());
+            return yield* serverAuth.removeTeamMember(args.payload.memberId);
+          },
+          Effect.catchTags({
+            TeamMemberNotFoundError: () => failEnvironmentInvalidRequest("team_member_not_found"),
+            TeamOwnerNotRemovableError: () =>
+              failEnvironmentOperationForbidden("team_owner_not_removable"),
+            TeamMemberRevocationError: (error) =>
+              failEnvironmentInternal("client_session_revoke_failed", error),
+            TeamsPersistenceError: (error) => failEnvironmentInternal("internal_error", error),
+          }),
+        ),
+      )
+      .handle(
         "revokeClient",
         Effect.fn("environment.auth.revokeClient")(
           function* (args) {
             yield* annotateEnvironmentRequest(args.endpoint.name);
-            const session = yield* requireEnvironmentScope(AuthAccessWriteScope);
+            const session = yield* requireAccessWriteMember(); // teams
             const revoked = yield* serverAuth.revokeClientSession(
               session.sessionId,
               args.payload.sessionId,
@@ -543,7 +607,7 @@ export const layer = HttpApiBuilder.group(
         Effect.fn("environment.auth.approveConnectDevice")(
           function* (args) {
             yield* annotateEnvironmentRequest(args.endpoint.name);
-            yield* requireEnvironmentScope(AuthAccessWriteScope);
+            yield* requireAccessWriteMember(); // teams
             const approved = yield* serverAuth.approveConnectDevice(args.payload.pairingLinkId);
             return { approved };
           },
@@ -557,7 +621,7 @@ export const layer = HttpApiBuilder.group(
         Effect.fn("environment.auth.revokeConnectDevice")(
           function* (args) {
             yield* annotateEnvironmentRequest(args.endpoint.name);
-            yield* requireEnvironmentScope(AuthAccessWriteScope);
+            yield* requireAccessWriteMember(); // teams
             const revoked = yield* serverAuth.revokeConnectDevice(args.payload.proofKeyThumbprint);
             return { revoked };
           },
@@ -571,7 +635,7 @@ export const layer = HttpApiBuilder.group(
         Effect.fn("environment.auth.revokeOtherClients")(
           function* (args) {
             yield* annotateEnvironmentRequest(args.endpoint.name);
-            const session = yield* requireEnvironmentScope(AuthAccessWriteScope);
+            const session = yield* requireAccessWriteMember(); // teams
             const revokedCount = yield* serverAuth.revokeOtherClientSessions(session.sessionId);
             return { revokedCount };
           },

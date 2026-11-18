@@ -44,6 +44,8 @@ import { searchableSetting } from "./settingsSearch";
 import { ConnectDeviceApprovalSettings } from "./ConnectDeviceApprovalSettings";
 import { EnvironmentIconMenu } from "./EnvironmentIconPicker";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
+import { TeamMembersSettings } from "~/teams/TeamMembersSettings";
+import { isTeamOwner } from "~/teams/teamMemberChoice";
 import { LinkedEnvironmentsSettings } from "./LinkedEnvironmentsSettings";
 import { usePeerLinkHosts } from "~/state/peerLinks";
 import { LoadBalancingSettings } from "./LoadBalancingSettings";
@@ -727,6 +729,12 @@ function ConnectionsSettingsContent({
     authAccessChanges.data?.type === "snapshot"
       ? (authAccessChanges.data.payload.connectDevices ?? null)
       : null;
+  // Older servers omit the list; they have no team members.
+  const teamMembers =
+    authAccessChanges.data?.type === "snapshot"
+      ? authAccessChanges.data.payload.teamMembers
+      : undefined;
+  const canManageTeam = isTeamOwner(accessSessionState.data?.teamMember, teamMembers ?? []);
   const updateAccessSettings = useUpdateEnvironmentSettings(accessEnvironmentId);
   const [pendingConnectRevoke, setPendingConnectRevoke] =
     useState<ConnectDeviceRevokeRequest | null>(null);
@@ -1346,6 +1354,7 @@ function ConnectionsSettingsContent({
                   <AuthorizedClientsHeaderAction
                     environmentId={accessEnvironmentId}
                     delegatableScopes={currentSessionScopes ?? []}
+                    teamMembers={canReadAccess && canManageTeam ? teamMembers : undefined}
                     onPairingLinkCreated={handlePairingLinkCreated}
                     clientSessions={
                       canReadAccess &&
@@ -1375,6 +1384,13 @@ function ConnectionsSettingsContent({
                 )}
               </ScrollArea>
             </FoldedSettingsSection>
+          ) : null}
+          {canReadAccess && teamMembers !== undefined ? (
+            <TeamMembersSettings
+              environmentId={accessEnvironmentId}
+              members={teamMembers}
+              canWrite={canWriteAccess && canManageTeam}
+            />
           ) : null}
           {canReadAccess &&
           connectDevices !== null &&

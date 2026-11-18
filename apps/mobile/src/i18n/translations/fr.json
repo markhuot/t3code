@@ -30,5 +30,8 @@
   "79b768229c9ef672": "Maintenance",
   "54b188d65247e42f": "Labs",
   "f41ea186c275b56e": "À propos",
-  "2a546119bf3879ee": "Archives"
+  "2a546119bf3879ee": "Archives",
+  "8ecb2ff304d8d1fe": "Envoyé par {name}",
+  "4017da27052612d5": "De la part de {name}",
+  "fc72951e91436523": "Cet appareil n'est pas connecté en tant que membre de l'équipe. Demandez à l'hôte un lien d'appairage personnel."
 }

@@ -40,6 +40,8 @@ export interface BootstrapGrant {
   readonly label?: string;
   readonly proofKeyThumbprint?: string;
   readonly expiresAt: DateTime.DateTime;
+  /** teams: the stored link this grant came from, so its session joins the link's member. */
+  readonly pairingLinkId?: string;
 }
 
 export class UnknownBootstrapCredentialError extends Schema.TaggedError<UnknownBootstrapCredentialError>()(
@@ -670,6 +672,7 @@ const make = Effect.gen(function* () {
             ? { proofKeyThumbprint: consumed.value.proofKeyThumbprint }
             : {}),
           expiresAt: consumed.value.expiresAt,
+          pairingLinkId: consumed.value.id, // teams
         } satisfies BootstrapGrant;
       }
 

@@ -11,6 +11,8 @@ import {
   ScheduledTaskId,
   type ScheduledTaskUpsertInput,
   SecretRef,
+  type TeamActor,
+  TeamMemberId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -35,6 +37,7 @@ import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
+import { REMOVED_ACTOR_MESSAGE } from "./teamsScheduledTaskActor.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 
 const isScheduledTaskError = Schema.is(ScheduledTaskError);
@@ -653,87 +656,146 @@ it.effect("a bound run follows its thread when promotion moves it mid-send", () 
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
 
-it.effect("a fresh-session task launches one thread, then starts each later run fresh in it", () =>
-  Effect.gen(function* () {
-    const launches = yield* Ref.make(0);
-    const sends = yield* Ref.make<Array<{ threadId: ThreadId; freshContext?: boolean }>>([]);
-    const launched = ThreadId.make("thread:fresh-session-task");
-    const layer = ScheduledTaskService.layer.pipe(
-      Layer.provide(
-        Layer.mergeAll(
-          ManagedPolicy.layerTest(),
-          Layer.mock(ThreadLaunchService.ThreadLaunchService)({
-            launch: () =>
-              Ref.update(launches, (n) => n + 1).pipe(
-                Effect.as({ threadId: launched, resumed: false } as never),
-              ),
-          }),
-          Layer.mock(ThreadManagementService.ThreadManagementService)({
-            getThreadShell: () => Effect.succeed({ deletedAt: null } as never),
-            sendToThread: (input) =>
-              Ref.update(sends, (all) => [
-                ...all,
-                {
-                  threadId: input.threadId,
-                  ...(input.freshContext === undefined ? {} : { freshContext: input.freshContext }),
-                },
-              ]).pipe(Effect.as({} as never)),
-          }),
-          Layer.mock(SecretRequests.SecretRequests)({}),
-          Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
-            namedProjectsRoot: "/projects",
-            isScratchProject: () => Effect.succeed(false),
-          }),
-          NodeCrypto.layer,
-          Layer.succeed(Scheduler.Scheduler, { register: () => Effect.void }),
+it.effect(
+  "a fresh-session task launches one thread, then starts each later run fresh in it, for whoever last set its prompt",
+  () =>
+    Effect.gen(function* () {
+      const launches = yield* Ref.make(0);
+      const sends = yield* Ref.make<
+        Array<{ threadId: ThreadId; freshContext?: boolean; actor?: TeamActor | undefined }>
+      >([]);
+      const launchActors = yield* Ref.make<Array<TeamActor | undefined>>([]);
+      const creator = { memberId: TeamMemberId.make("member:creator"), name: "Creator" };
+      const editor = { memberId: TeamMemberId.make("member:editor"), name: "Editor" };
+      const launched = ThreadId.make("thread:fresh-session-task");
+      const runDueWork = yield* Ref.make<Effect.Effect<void>>(Effect.void);
+      const layer = ScheduledTaskService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            ManagedPolicy.layerTest(),
+            Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+              launch: (input) =>
+                Ref.update(launches, (n) => n + 1).pipe(
+                  Effect.andThen(Ref.update(launchActors, (all) => [...all, input.actor])),
+                  Effect.as({ threadId: launched, resumed: false } as never),
+                ),
+            }),
+            Layer.mock(ThreadManagementService.ThreadManagementService)({
+              getThreadShell: () => Effect.succeed({ deletedAt: null } as never),
+              sendToThread: (input) =>
+                Ref.update(sends, (all) => [
+                  ...all,
+                  {
+                    threadId: input.threadId,
+                    ...(input.freshContext === undefined
+                      ? {}
+                      : { freshContext: input.freshContext }),
+                    actor: input.actor,
+                  },
+                ]).pipe(Effect.as({} as never)),
+            }),
+            Layer.mock(SecretRequests.SecretRequests)({}),
+            Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+              namedProjectsRoot: "/projects",
+              isScratchProject: () => Effect.succeed(false),
+            }),
+            NodeCrypto.layer,
+            // Capture the poll pass so the test drives a due interval directly.
+            Layer.mock(Scheduler.Scheduler)({
+              register: (name, work) =>
+                name !== "scheduled-tasks"
+                  ? Effect.void
+                  : Effect.context<Effect.Services<typeof work>>().pipe(
+                      Effect.flatMap((context) =>
+                        Ref.set(
+                          runDueWork,
+                          work.pipe(Effect.provideContext(context), Effect.orDie),
+                        ),
+                      ),
+                    ),
+            }),
+          ),
         ),
-      ),
-    );
-    yield* Effect.gen(function* () {
-      const service = yield* ScheduledTaskService.ScheduledTaskService;
-      const input = {
-        id: ScheduledTaskId.make("task:fresh-session"),
-        title: "Triage",
-        prompt: "Triage new issues",
-        enabled: true,
-        schedule: { type: "interval", everyMs: 60_000 },
-        projectId: ProjectId.make("project:test"),
-        workspaceStrategy: { type: "root" },
-        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
-        runtimeMode: "full-access",
-        interactionMode: "default",
-      } as const;
-      yield* service.upsert({ ...input, threadMode: "fresh_session" });
+      );
+      yield* Effect.gen(function* () {
+        const service = yield* ScheduledTaskService.ScheduledTaskService;
+        const input = {
+          id: ScheduledTaskId.make("task:fresh-session"),
+          title: "Triage",
+          prompt: "Triage new issues",
+          enabled: true,
+          schedule: { type: "interval", everyMs: 60_000 },
+          projectId: ProjectId.make("project:test"),
+          workspaceStrategy: { type: "root" },
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+        } as const;
+        yield* service.upsert({ ...input, threadMode: "fresh_session", actor: creator });
 
-      assert.equal((yield* service.runNow({ id: input.id })).threadId, launched);
-      // A form opened before the first run saves no thread; the binding stays.
-      const { task } = yield* service.upsert({
-        ...input,
-        threadId: null,
-        threadMode: "fresh_session",
-      });
-      assert.equal(task.threadId, launched);
-      assert.equal(task.threadMode, "fresh_session");
-      // A client that predates thread modes sends neither; both stay.
-      const legacy = yield* service.upsert({ ...input, threadId: null });
-      assert.equal(legacy.task.threadId, launched);
-      assert.equal(legacy.task.threadMode, "fresh_session");
-      yield* service.runNow({ id: input.id });
+        assert.equal((yield* service.runNow({ id: input.id })).threadId, launched);
+        // A form opened before the first run saves no thread; the binding stays.
+        const { task } = yield* service.upsert({
+          ...input,
+          threadId: null,
+          threadMode: "fresh_session",
+        });
+        assert.equal(task.threadId, launched);
+        assert.equal(task.threadMode, "fresh_session");
+        // A client that predates thread modes sends neither; both stay.
+        // Someone else's edit does not change whom the task works for.
+        const legacy = yield* service.upsert({ ...input, threadId: null, actor: editor });
+        assert.deepEqual(legacy.task.actor, creator);
+        assert.equal(legacy.task.threadId, launched);
+        assert.equal(legacy.task.threadMode, "fresh_session");
+        yield* service.runNow({ id: input.id });
 
-      assert.equal(yield* Ref.get(launches), 1);
-      assert.deepEqual(yield* Ref.get(sends), [{ threadId: launched, freshContext: true }]);
-      // Its thread stays in the old project, so moving the task leaves it for a new one.
-      const moved = yield* service.upsert({
-        ...input,
-        projectId: ProjectId.make("project:moved"),
-        threadId: launched,
-      });
-      assert.equal(moved.task.threadId, null);
-      assert.equal(moved.task.threadMode, "fresh_session");
-      const unbound = yield* service.upsert({ ...input, threadMode: "new_thread" });
-      assert.equal(unbound.task.threadId, null);
-    }).pipe(Effect.provide(layer));
-  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+        assert.equal(yield* Ref.get(launches), 1);
+        assert.deepEqual(yield* Ref.get(launchActors), [creator]);
+        assert.deepEqual(yield* Ref.get(sends), [
+          { threadId: launched, freshContext: true, actor: creator },
+        ]);
+        // Its thread stays in the old project, so moving the task leaves it for a new one.
+        const moved = yield* service.upsert({
+          ...input,
+          projectId: ProjectId.make("project:moved"),
+          threadId: launched,
+        });
+        assert.equal(moved.task.threadId, null);
+        assert.equal(moved.task.threadMode, "fresh_session");
+        const unbound = yield* service.upsert({ ...input, threadMode: "new_thread" });
+        assert.equal(unbound.task.threadId, null);
+
+        // Rewriting the prompt makes the task work for whoever rewrote it.
+        const rewritten = {
+          ...input,
+          prompt: "Triage and label new issues",
+          threadMode: "new_thread",
+        } as const;
+        const edited = yield* service.upsert({ ...rewritten, actor: editor });
+        assert.deepEqual(edited.task.actor, editor);
+
+        // Once that member is removed, the task neither runs on demand nor on schedule.
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`
+          INSERT INTO team_members (id, name, owner, created_at, removed_at)
+          VALUES (${editor.memberId}, ${editor.name}, 0, ${"2026-01-01T00:00:00.000Z"}, ${"2026-01-02T00:00:00.000Z"})
+        `;
+        const refused = yield* Effect.flip(service.runNow({ id: input.id }));
+        assert.equal(refused.message, REMOVED_ACTOR_MESSAGE);
+        yield* TestClock.adjust("61 seconds");
+        yield* Effect.flatten(Ref.get(runDueWork));
+        const [paused] = (yield* service.list()).tasks;
+        assert.equal(paused?.enabled, false);
+        assert.equal(paused?.nextRunAt, null);
+        assert.equal(yield* Ref.get(launches), 1);
+        assert.equal((yield* Ref.get(sends)).length, 1);
+
+        // Someone still on the team takes it over by saving it, even unchanged.
+        const claimed = yield* service.upsert({ ...rewritten, actor: creator });
+        assert.deepEqual(claimed.task.actor, creator);
+      }).pipe(Effect.provide(layer));
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
 
 it.effect("a refused dispatch records its refusal, and opaque causes stay generic", () =>

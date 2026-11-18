@@ -294,7 +294,9 @@ describe("t3 pair", () => {
           }),
         });
 
-        const output = yield* captureStdout(runCli(["pair", "--base-dir", baseDir]));
+        const output = yield* captureStdout(
+          runCli(["pair", "--base-dir", baseDir, "--member", "Alex"]), // teams
+        );
 
         assert.include(output, `Pairing with pair-test (${origin})`);
         assert.include(output, `Pairing URL: ${origin}/pair#token=`);
@@ -311,9 +313,11 @@ describe("t3 pair", () => {
         const credentials = JSON.parse(listed) as ReadonlyArray<{
           readonly label?: string;
           readonly scopes: ReadonlyArray<string>;
+          readonly teamMember?: { readonly name: string };
         }>;
         assert.equal(credentials.length, 1);
         assert.equal(credentials[0]?.label, "t3 pair");
+        assert.equal(credentials[0]?.teamMember?.name, "Alex"); // teams
         assert.deepEqual(credentials[0]?.scopes, AuthStandardClientScopes);
       }),
     ).pipe(

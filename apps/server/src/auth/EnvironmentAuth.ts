@@ -15,6 +15,7 @@ import {
   type AuthPairingCredentialResult,
   type AuthSessionId,
   type AuthSessionState,
+  type TeamMemberId,
   authScopeResponse,
   type ServerAuthDescriptor,
   type ServerAuthSessionMethod,
@@ -50,6 +51,7 @@ import { DESKTOP_RENDERER_ORIGINS } from "../httpCors.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ManagedLimits from "../policy/managedLimits.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
+import * as Teams from "../teams/Teams.ts"; // teams
 import {
   MCP_APPROVAL_SUBJECT_PREFIX,
   PEER_LINK_PAIRING_SUBJECT_PREFIX,
@@ -523,6 +525,8 @@ export class EnvironmentAuth extends Context.Service<
       readonly purpose?: "startup";
       readonly mcpApproval?: AuthMcpClientAccess;
       readonly requiresConnectApproval?: boolean;
+      /** teams: the member a client paired with this link signs in as; a name finds or adds one. */
+      readonly teamMember?: TeamMemberId | { readonly name: string; readonly email?: string };
     }) => Effect.Effect<
       IssuedPairingLink,
       ServerAuthInternalError | ManagedLimits.ManagedPolicyRefusedError
@@ -557,11 +561,15 @@ export class EnvironmentAuth extends Context.Service<
     readonly revokeConnectDevice: (
       proofKeyThumbprint: string,
     ) => Effect.Effect<boolean, ServerAuthInternalError>;
-    readonly issuePairingCredential: (
-      input?: AuthCreatePairingCredentialInput,
-    ) => Effect.Effect<
+    /** teams: removes a member while no T3 Connect exchange can re-trust one of its keys. */
+    readonly removeTeamMember: (
+      memberId: TeamMemberId,
+    ) => ReturnType<Teams.Teams["Service"]["removeMember"]>;
+    readonly issuePairingCredential: (input?: AuthCreatePairingCredentialInput) => Effect.Effect<
       AuthPairingCredentialResult,
-      ServerAuthInternalError | ManagedLimits.ManagedPolicyRefusedError
+      | ServerAuthInternalError
+      | ManagedLimits.ManagedPolicyRefusedError
+      | Teams.TeamMemberNotFoundError // teams
     >;
     readonly issueStartupPairingCredential: () => Effect.Effect<
       AuthPairingCredentialResult,
@@ -788,6 +796,7 @@ export const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const managedPolicy = yield* ManagedPolicy.ManagedPolicy;
   const devAuth = resolveReusableDevAuth(config);
+  const teams = yield* Teams.Teams; // teams
 
   const authenticateToken = (
     token: string,
@@ -894,15 +903,22 @@ export const make = Effect.gen(function* () {
 
   const getSessionState: EnvironmentAuth["Service"]["getSessionState"] = (request) =>
     authenticateRequest(request).pipe(
-      Effect.map(
-        (session) =>
-          ({
-            authenticated: true,
-            auth: descriptor,
-            ...authScopeResponse(session.scopes),
-            sessionMethod: session.method,
-            ...(session.expiresAt ? { expiresAt: DateTime.toUtc(session.expiresAt) } : {}),
-          }) satisfies AuthSessionState,
+      Effect.flatMap((session) =>
+        // teams: null, not absent, tells clients this server has teams and the session is no one.
+        teams.resolveActor(session).pipe(
+          Effect.mapError((cause) => new ServerAuthSessionCredentialValidationError({ cause })),
+          Effect.map(
+            (teamMember) =>
+              ({
+                authenticated: true,
+                auth: descriptor,
+                ...authScopeResponse(session.scopes),
+                sessionMethod: session.method,
+                ...(session.expiresAt ? { expiresAt: DateTime.toUtc(session.expiresAt) } : {}),
+                teamMember: teamMember ?? null,
+              }) satisfies AuthSessionState,
+          ),
+        ),
       ),
       Effect.catchIf(isServerAuthCredentialError, () =>
         Effect.succeed({
@@ -964,6 +980,19 @@ export const make = Effect.gen(function* () {
         },
       })
       .pipe(Effect.mapError((cause) => new ServerAuthAuthenticatedSessionIssueError({ cause })));
+    yield* teams // teams
+      .bindIssuedSession({
+        sessionId: session.sessionId,
+        pairingLinkId: grant.pairingLinkId,
+        replacedSessionId: previousSession?.sessionId,
+      })
+      .pipe(
+        Effect.mapError((cause) =>
+          cause._tag === "TeamMemberRemovedError"
+            ? new ServerAuthInvalidCredentialError({ cause })
+            : new ServerAuthAuthenticatedSessionIssueError({ cause }),
+        ),
+      );
     return {
       response: {
         authenticated: true,
@@ -977,7 +1006,7 @@ export const make = Effect.gen(function* () {
 
   type ResolvedBootstrapGrant = Pick<
     PairingGrantStore.BootstrapGrant,
-    "scopes" | "subject" | "label"
+    "scopes" | "subject" | "label" | "pairingLinkId" // teams: pairingLinkId
   > & {
     readonly method: PairingGrantStore.BootstrapGrant["method"] | "reusable-dev-token";
   };
@@ -1086,6 +1115,18 @@ export const make = Effect.gen(function* () {
                 Effect.mapError(
                   (cause) => new ServerAuthAuthenticatedAccessTokenIssueError({ cause }),
                 ),
+                Effect.tap((session) =>
+                  // teams
+                  teams
+                    .bindIssuedSession({ ...session, pairingLinkId: grant.pairingLinkId })
+                    .pipe(
+                      Effect.mapError((cause) =>
+                        cause._tag === "TeamMemberRemovedError"
+                          ? new ServerAuthInvalidCredentialError({ cause })
+                          : new ServerAuthAuthenticatedAccessTokenIssueError({ cause }),
+                      ),
+                    ),
+                ),
               );
           }),
         ),
@@ -1123,6 +1164,7 @@ export const make = Effect.gen(function* () {
 
   const issuePairingLink = Effect.fn("EnvironmentAuth.issuePairingLink")(
     function* (input: Parameters<EnvironmentAuth["Service"]["createPairingLink"]>[0]) {
+      const teamMemberId = yield* teams.pairingLinkMemberId(input?.teamMember); // teams
       const createdAt = yield* DateTime.now;
       const issued = yield* bootstrapCredentials.issueOneTimeToken({
         scopes: input?.scopes ?? AuthStandardClientScopes,
@@ -1134,6 +1176,7 @@ export const make = Effect.gen(function* () {
         ...(input?.mcpApproval ? { mcpApproval: input.mcpApproval } : {}),
         ...(input?.requiresConnectApproval ? { requiresConnectApproval: true } : {}),
       });
+      if (teamMemberId) yield* teams.bindPairingLink(issued.id, teamMemberId); // teams
       return {
         id: issued.id,
         credential: issued.credential,
@@ -1177,6 +1220,7 @@ export const make = Effect.gen(function* () {
             (left, right) => right.createdAt.epochMilliseconds - left.createdAt.epochMilliseconds,
           );
       }),
+      Effect.flatMap(teams.withPairingLinkMembers), // teams
       Effect.mapError((cause) => new ServerAuthPairingLinksListError({ cause })),
       Effect.withSpan("EnvironmentAuth.listPairingLinks"),
     );
@@ -1207,7 +1251,11 @@ export const make = Effect.gen(function* () {
     requireApproval,
   }: Parameters<EnvironmentAuth["Service"]["issueConnectCredential"]>[0]) {
     const mustWait =
-      requireApproval &&
+      (requireApproval ||
+        // teams: a removed member's key needs the host's approval to get back in, as no one.
+        (yield* teams
+          .isRemovedMemberProofKey(proofKeyThumbprint)
+          .pipe(Effect.mapError((cause) => new ServerAuthConnectDevicesError({ cause }))))) &&
       !(yield* bootstrapCredentials
         .isConnectDeviceTrusted(proofKeyThumbprint)
         .pipe(Effect.mapError((cause) => new ServerAuthConnectDevicesError({ cause }))));
@@ -1271,9 +1319,15 @@ export const make = Effect.gen(function* () {
       const revokedSessions = yield* sessions
         .revokeByProofKey(proofKeyThumbprint)
         .pipe(Effect.mapError((cause) => new ServerAuthSessionRevocationError({ cause })));
+      yield* teams // teams: a revoked key re-pairing later is no one until a member link says
+        .unbindProofKey(proofKeyThumbprint)
+        .pipe(Effect.mapError((cause) => new ServerAuthSessionRevocationError({ cause })));
       return removed || revokedSessions > 0;
     }).pipe(connectTrustLock.withPermits(1));
   });
+
+  const removeTeamMember: EnvironmentAuth["Service"]["removeTeamMember"] = (memberId) =>
+    teams.removeMember(memberId).pipe(connectTrustLock.withPermits(1)); // teams
 
   const revokeConnectDeviceByCode: EnvironmentAuth["Service"]["revokeConnectDeviceByCode"] =
     Effect.fn("EnvironmentAuth.revokeConnectDeviceByCode")(function* (verificationCode) {
@@ -1325,6 +1379,7 @@ export const make = Effect.gen(function* () {
 
   const revokeSession: EnvironmentAuth["Service"]["revokeSession"] = (sessionId) =>
     sessions.revoke(sessionId).pipe(
+      Effect.tap(() => teams.unbindSessions([sessionId])), // teams
       Effect.mapError((cause) => new ServerAuthSessionRevocationError({ cause })),
       Effect.withSpan("EnvironmentAuth.revokeSession"),
     );
@@ -1335,8 +1390,21 @@ export const make = Effect.gen(function* () {
       Effect.withSpan("EnvironmentAuth.revokeOtherSessionsExcept"),
     );
 
-  const issuePairingCredential: EnvironmentAuth["Service"]["issuePairingCredential"] = (input) =>
-    createPairingLink({
+  const issuePairingCredential: EnvironmentAuth["Service"]["issuePairingCredential"] = Effect.fn(
+    "EnvironmentAuth.issuePairingCredential",
+  )(function* (input) {
+    // teams: peer-link and agent approval codes never sign in as a member.
+    const member =
+      input?.teamMember && !input.access
+        ? yield* teams.resolvePairingMember(input.teamMember).pipe(
+            Effect.catchTags({
+              TeamsPersistenceError: (cause) =>
+                Effect.fail(new ServerAuthPairingLinkCreationError({ cause })),
+            }),
+          )
+        : undefined;
+    const issued = yield* createPairingLink({
+      ...(member ? { teamMember: member.id } : {}), // teams
       scopes: input?.access
         ? mcpClientScopes(input.access)
         : (input?.scopes ?? AuthStandardClientScopes),
@@ -1346,14 +1414,13 @@ export const make = Effect.gen(function* () {
           : "one-time-token",
       ...(input?.label ? { label: input.label } : {}),
       ...(input?.access && input.purpose !== "peer-link" ? { mcpApproval: input.access } : {}),
-    }).pipe(
-      Effect.map((issued) => ({
-        ...toPairingCredential(issued),
-        ...(input?.access ? { access: input.access } : {}),
-        ...(input?.access && input.purpose === "peer-link" ? { purpose: input.purpose } : {}),
-      })),
-      Effect.withSpan("EnvironmentAuth.issuePairingCredential"),
-    );
+    });
+    return {
+      ...toPairingCredential(issued),
+      ...(input?.access ? { access: input.access } : {}),
+      ...(input?.access && input.purpose === "peer-link" ? { purpose: input.purpose } : {}),
+    };
+  });
 
   const issueStartupPairingCredential: EnvironmentAuth["Service"]["issueStartupPairingCredential"] =
     () => {
@@ -1394,6 +1461,12 @@ export const make = Effect.gen(function* () {
           current: clientSession.sessionId === currentSessionId,
         })),
       ),
+      Effect.flatMap((clientSessions) =>
+        // teams
+        teams
+          .withClientSessionMembers(clientSessions)
+          .pipe(Effect.mapError((cause) => new ServerAuthSessionsListError({ cause }))),
+      ),
       Effect.withSpan("EnvironmentAuth.listClientSessions"),
     );
 
@@ -1427,7 +1500,14 @@ export const make = Effect.gen(function* () {
         yield* bootstrapCredentials
           .revokeConnectDevicesExcept(Option.getOrNull(currentProofKey))
           .pipe(Effect.mapError((cause) => new ServerAuthConnectDevicesError({ cause })));
-        return yield* revokeOtherSessionsExcept(currentSessionId);
+        const revoked = yield* revokeOtherSessionsExcept(currentSessionId);
+        yield* teams // teams
+          .unbindAllExcept({
+            sessionId: currentSessionId,
+            proofKeyThumbprint: Option.getOrNull(currentProofKey),
+          })
+          .pipe(Effect.mapError((cause) => new ServerAuthOtherSessionsRevocationError({ cause })));
+        return revoked;
       }).pipe(connectTrustLock.withPermits(1));
     });
 
@@ -1617,6 +1697,7 @@ export const make = Effect.gen(function* () {
     approveConnectDeviceByCode,
     listConnectDevices,
     revokeConnectDevice,
+    removeTeamMember, // teams
     revokeConnectDeviceByCode,
     issuePairingCredential,
     issueStartupPairingCredential,
@@ -1699,6 +1780,7 @@ const revokePairedClientsThePolicyDisallows = Effect.fn(
 });
 
 export const layer = Layer.effect(EnvironmentAuth, make).pipe(
+  Layer.provideMerge(Teams.layer), // teams
   Layer.provideMerge(PairingGrantStore.layer),
   Layer.provideMerge(SessionStore.layer),
   Layer.provideMerge(EnvironmentAuthPolicy.layer),

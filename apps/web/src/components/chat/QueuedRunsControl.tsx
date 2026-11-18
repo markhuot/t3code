@@ -36,6 +36,7 @@ import { useQuietThreadProjection, useQuietThreadShell } from "../../state/entit
 import { useEnvironment } from "../../state/environments";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { isImageAttachment, type ChatImageAttachment, type ChatMessage } from "../../types";
+import { TeamActorLabel } from "~/teams/TeamActorLabel";
 import { cn } from "~/lib/utils";
 import { Button, InlineButton } from "../ui/button";
 import { toastManager } from "../ui/toast";
@@ -455,6 +456,7 @@ function QueuedMessage(props: {
       {attribution === "t3code" ? (
         <p className="me-1 text-2xs text-muted-foreground/70">Sent by T3 Code</p>
       ) : null}
+      {props.message ? <TeamActorLabel message={props.message} /> : null}
       {presentation?.guestName === undefined ? null : (
         <GuestMessageName name={presentation.guestName} />
       )}

@@ -19,6 +19,7 @@ import {
   type RunId,
   type RuntimeMode,
   type ScheduledTaskId,
+  type TeamActor,
   TextGenerationError,
   ThreadId,
 } from "@t3tools/contracts";
@@ -28,6 +29,7 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import { withTeamActor } from "./teamsActor.ts";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -108,6 +110,8 @@ export interface ThreadLaunchInput {
   };
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
+  /** teams: omitted, the thread inherits the driver of `initialMessage.senderThreadId`. */
+  readonly actor?: TeamActor | undefined;
   /** The linked environment this launch is for, if one asked for it. */
   readonly linkOrigin?: OrchestrationV2LinkOrigin;
   /** The parent there, when that environment's agent delegated this as a task. */
@@ -1340,6 +1344,7 @@ const make = Effect.gen(function* () {
                   : { delegatedFrom: input.delegatedFrom }),
                 createdBy: input.createdBy,
                 creationSource: input.creationSource,
+                ...withTeamActor(input.actor),
                 ...(initialMessage === undefined
                   ? {}
                   : { initialMessage: { ...initialMessage, workspaceStrategy } }),
@@ -1383,6 +1388,7 @@ const make = Effect.gen(function* () {
                 dispatchMode: { type: "defer_start", workspaceStrategy },
                 createdBy: input.createdBy,
                 creationSource: input.creationSource,
+                ...withTeamActor(input.actor),
               })
               .pipe(
                 // An agent's launch can land on a thread that a replay, or a concurrent

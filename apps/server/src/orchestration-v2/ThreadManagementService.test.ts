@@ -13,7 +13,9 @@ import {
   type OrchestrationV2ThreadProjection,
   ProjectId,
   ProviderInstanceId,
+  NodeId,
   RunId,
+  TeamMemberId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
@@ -44,11 +46,16 @@ import {
   WorktreeRecreateError,
 } from "../workspace/restoreMissingWorktree.ts";
 
+const forgedActor = { memberId: TeamMemberId.make("member:forged"), name: "Forged" };
+const sessionActor = { memberId: TeamMemberId.make("member:session"), name: "Session" };
+
 it("stamps authoritative provenance on commands that create threads or messages", () => {
   const command: OrchestrationV2Command = {
     type: "thread.create",
     createdBy: "agent",
     creationSource: "mcp",
+    // A client cannot claim to be another member.
+    actor: forgedActor,
     commandId: CommandId.make("command:thread-management:create"),
     threadId: ThreadId.make("thread:thread-management:create"),
     projectId: ProjectId.make("project:thread-management"),
@@ -79,14 +86,76 @@ it("stamps authoritative provenance on commands that create threads or messages"
   const stamped = ThreadManagementService.withCreationProvenance(command, {
     createdBy: "user",
     creationSource: "web",
+    actor: sessionActor,
   });
   expect(stamped).toMatchObject({
     createdBy: "user",
     creationSource: "web",
+    actor: sessionActor,
   });
   expect(stamped).not.toHaveProperty("linkOrigin");
   expect(stamped).not.toHaveProperty("delegatedFrom");
   expect(stamped).not.toHaveProperty("initialMessage");
+});
+
+it.each<OrchestrationV2Command>([
+  {
+    type: "message.dispatch",
+    createdBy: "agent",
+    creationSource: "mcp",
+    actor: forgedActor,
+    commandId: CommandId.make("command:thread-management:actor-message"),
+    threadId: ThreadId.make("thread:thread-management:actor"),
+    messageId: MessageId.make("message:thread-management:actor"),
+    text: "Hello",
+    attachments: [],
+    dispatchMode: { type: "start_immediately" },
+  },
+  {
+    type: "thread.fork",
+    createdBy: "agent",
+    creationSource: "mcp",
+    actor: forgedActor,
+    commandId: CommandId.make("command:thread-management:actor-fork"),
+    sourceThreadId: ThreadId.make("thread:thread-management:actor"),
+    targetThreadId: ThreadId.make("thread:thread-management:actor-fork"),
+    sourcePoint: { type: "latest_stable" },
+  },
+  {
+    type: "thread.merge_back",
+    createdBy: "agent",
+    creationSource: "mcp",
+    actor: forgedActor,
+    commandId: CommandId.make("command:thread-management:actor-merge"),
+    sourceThreadId: ThreadId.make("thread:thread-management:actor-fork"),
+    targetThreadId: ThreadId.make("thread:thread-management:actor"),
+    sourcePoint: { type: "latest_stable" },
+  },
+  {
+    type: "delegated_task.request",
+    createdBy: "agent",
+    creationSource: "mcp",
+    actor: forgedActor,
+    commandId: CommandId.make("command:thread-management:actor-task"),
+    parentThreadId: ThreadId.make("thread:thread-management:actor"),
+    parentRunId: RunId.make("run:thread-management:actor"),
+    parentNodeId: NodeId.make("node:thread-management:actor"),
+    task: "Do it",
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+  },
+])("replaces a client's actor on $type with the session's, or none", (command) => {
+  const provenance = { createdBy: "user", creationSource: "web" } as const;
+  expect(
+    ThreadManagementService.withCreationProvenance(command, {
+      ...provenance,
+      actor: sessionActor,
+    }),
+  ).toMatchObject({ actor: sessionActor });
+  expect(ThreadManagementService.withCreationProvenance(command, provenance)).not.toHaveProperty(
+    "actor",
+  );
 });
 
 const layerReceiptsTest = CommandReceiptStore.layer.pipe(

@@ -9,6 +9,7 @@ import {
   OrchestrationV2ProviderTurnTokenUsage,
   OrchestrationV2Run,
   OrchestrationV2ThreadProjection,
+  TeamActor,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -16,6 +17,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import { withTeamActor } from "./teamsActor.ts";
 
 export interface ThreadForkPlanV2 {
   readonly targetThread: OrchestrationV2AppThread;
@@ -62,6 +64,8 @@ export interface ThreadForkServiceV2Shape {
     readonly sideChat?: boolean;
     readonly createdBy: OrchestrationV2Actor;
     readonly creationSource: OrchestrationV2CreationSource;
+    /** teams: who the fork works for; the source's own actor is never inherited. */
+    readonly actor?: TeamActor | undefined;
     readonly createdAt: DateTime.Utc;
   }) => Effect.Effect<ThreadForkPlanV2, ThreadForkPlanError>;
 }
@@ -100,7 +104,11 @@ export const layer: Layer.Layer<ThreadForkServiceV2> = Layer.succeed(
         });
       }
       // The remote parent delegated the source thread, not its forks.
-      const { delegatedFrom: _delegatedFrom, ...inherited } = input.sourceProjection.thread;
+      const {
+        delegatedFrom: _delegatedFrom,
+        actor: _actor,
+        ...inherited
+      } = input.sourceProjection.thread;
       const targetThread: OrchestrationV2AppThread = {
         ...inherited,
         // PR context follows the conversation; watching remains the source thread's responsibility.
@@ -109,6 +117,7 @@ export const layer: Layer.Layer<ThreadForkServiceV2> = Layer.succeed(
         ),
         createdBy: input.createdBy,
         creationSource: input.creationSource,
+        ...withTeamActor(input.actor),
         id: input.targetThreadId,
         title: input.title ?? `${input.sourceProjection.thread.title} fork`,
         // The source's title job completes only on the source thread.

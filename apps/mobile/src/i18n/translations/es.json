@@ -30,5 +30,8 @@
   "79b768229c9ef672": "Mantenimiento",
   "54b188d65247e42f": "Labs",
   "f41ea186c275b56e": "Acerca de",
-  "2a546119bf3879ee": "Archivados"
+  "2a546119bf3879ee": "Archivados",
+  "8ecb2ff304d8d1fe": "Enviado por {name}",
+  "4017da27052612d5": "En nombre de {name}",
+  "fc72951e91436523": "Este dispositivo no ha iniciado sesión como miembro del equipo. Pide al anfitrión un enlace de emparejamiento personal."
 }

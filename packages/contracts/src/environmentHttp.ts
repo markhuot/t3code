@@ -94,6 +94,13 @@ import {
   RelayEnvironmentMintResponse,
   RelayLinkProofRequest,
 } from "./relay.ts";
+// teams
+import {
+  TeamMember,
+  TeamMemberRemoveInput,
+  TeamMemberRemoveResult,
+  TeamMemberUpdateInput,
+} from "./teams.ts";
 
 const OptionalBearerHeaders = Schema.Struct({
   authorization: Schema.optionalKey(Schema.String),
@@ -119,6 +126,8 @@ export const EnvironmentRequestInvalidReason = Schema.Literals([
   "invalid_audio",
   "speech_unavailable",
   "speech_busy",
+  // teams
+  "team_member_not_found",
 ]);
 export type EnvironmentRequestInvalidReason = typeof EnvironmentRequestInvalidReason.Type;
 
@@ -130,6 +139,10 @@ export type EnvironmentAuthInvalidReason = typeof EnvironmentAuthInvalidReason.T
 
 export const EnvironmentOperationForbiddenReason = Schema.Literals([
   "current_session_revoke_not_allowed",
+  // teams
+  "team_owner_not_removable",
+  "team_owner_required",
+  "team_identity_required",
 ]);
 export type EnvironmentOperationForbiddenReason = typeof EnvironmentOperationForbiddenReason.Type;
 
@@ -393,10 +406,16 @@ const EnvironmentScopedOperationErrors = [
   EnvironmentScopeRequiredError,
   EnvironmentInternalError,
 ] as const;
+// teams: a session that is no team member can't change who has access.
+const EnvironmentAccessWriteErrors = [
+  EnvironmentOperationForbiddenError,
+  ...EnvironmentScopedOperationErrors,
+] as const;
 const EnvironmentPairingCredentialErrors = [
   EnvironmentRequestInvalidError,
   // The managed policy does not allow remote clients.
   EnvironmentHttpForbiddenError,
+  EnvironmentOperationForbiddenError, // teams: members only; only the host binds a link to one
   ...EnvironmentScopedOperationErrors,
 ] as const;
 const EnvironmentSessionRevokeErrors = [
@@ -638,7 +657,28 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
       headers: OptionalBearerHeaders,
       payload: AuthRevokePairingLinkInput,
       success: AuthPairingLinkRevokeResult,
-      error: EnvironmentScopedOperationErrors,
+      error: EnvironmentAccessWriteErrors, // teams
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  // teams
+  .add(
+    HttpApiEndpoint.post("updateTeamMember", "/api/auth/team-members/update", {
+      headers: OptionalBearerHeaders,
+      payload: TeamMemberUpdateInput,
+      success: TeamMember,
+      error: [
+        EnvironmentRequestInvalidError,
+        EnvironmentOperationForbiddenError,
+        ...EnvironmentScopedOperationErrors,
+      ],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("removeTeamMember", "/api/auth/team-members/remove", {
+      headers: OptionalBearerHeaders,
+      payload: TeamMemberRemoveInput,
+      success: TeamMemberRemoveResult,
+      error: [EnvironmentRequestInvalidError, ...EnvironmentSessionRevokeErrors],
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
@@ -654,7 +694,7 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
       headers: OptionalBearerHeaders,
       payload: AuthApproveConnectDeviceInput,
       success: AuthApproveConnectDeviceResult,
-      error: EnvironmentScopedOperationErrors,
+      error: EnvironmentAccessWriteErrors, // teams
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
@@ -662,14 +702,14 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
       headers: OptionalBearerHeaders,
       payload: AuthRevokeConnectDeviceInput,
       success: AuthRevokeConnectDeviceResult,
-      error: EnvironmentScopedOperationErrors,
+      error: EnvironmentAccessWriteErrors, // teams
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
     HttpApiEndpoint.post("revokeOtherClients", "/api/auth/clients/revoke-others", {
       headers: OptionalBearerHeaders,
       success: AuthOtherClientSessionsRevokeResult,
-      error: EnvironmentScopedOperationErrors,
+      error: EnvironmentAccessWriteErrors, // teams
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 

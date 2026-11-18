@@ -22,6 +22,7 @@ import {
   RuntimeRequestId,
   TurnItemId,
   type ModelSelection,
+  type OrchestrationV2Command,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2Run,
   type OrchestrationV2ShellSnapshot,
@@ -38,6 +39,7 @@ import {
   ProviderTurnId,
   RunId,
   ScheduledTaskId,
+  TeamMemberId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -7132,6 +7134,106 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         linkedSender,
       );
     }),
+  );
+
+  it.effect(
+    "stamps who each message works for: its sender, else the sender or target thread's driver",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const member = (name: string) => ({ memberId: TeamMemberId.make(`member-${name}`), name });
+        const [alice, bob, carol] = [member("Alice"), member("Bob"), member("Carol")];
+        const projectId = ProjectId.make("runtime-layer-actor-project");
+        const createThread = (suffix: string, actor: typeof alice) =>
+          orchestrator.dispatch({
+            type: "thread.create",
+            createdBy: "user",
+            creationSource: "web",
+            actor,
+            commandId: CommandId.make(`runtime-layer-actor-create-${suffix}`),
+            threadId: ThreadId.make(`runtime-layer-actor-${suffix}`),
+            projectId,
+            title: `Actor ${suffix}`,
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: `/tmp/runtime-layer-actor-${suffix}`,
+          });
+        const send = (
+          suffix: string,
+          threadId: ThreadId,
+          fields: Pick<
+            Extract<OrchestrationV2Command, { type: "message.dispatch" }>,
+            "createdBy" | "creationSource" | "actor" | "senderThreadId"
+          >,
+        ) =>
+          orchestrator.dispatch({
+            type: "message.dispatch",
+            ...fields,
+            commandId: CommandId.make(`runtime-layer-actor-send-${suffix}`),
+            threadId,
+            messageId: MessageId.make(`runtime-layer-actor-${suffix}`),
+            text: `Message ${suffix}`,
+            attachments: [],
+            modelSelection,
+            dispatchMode: { type: "start_immediately" },
+          });
+        const stamped = Effect.fn("stamped")(function* (threadId: ThreadId, suffix: string) {
+          const projection = yield* orchestrator.getThreadProjection(threadId);
+          const message = projection.messages.find(
+            (candidate) => candidate.id === `runtime-layer-actor-${suffix}`,
+          );
+          const item = projection.turnItems.find(
+            (candidate) =>
+              candidate.type === "user_message" &&
+              candidate.messageId === `runtime-layer-actor-${suffix}`,
+          );
+          return {
+            message: message?.actor,
+            item: item?.type === "user_message" ? item.actor : undefined,
+          };
+        });
+
+        // Alice started the thread, but Bob is the one now prompting it.
+        const driving = ThreadId.make("runtime-layer-actor-driving");
+        yield* createThread("driving", alice);
+        yield* send("bob-prompt", driving, {
+          createdBy: "user",
+          creationSource: "web",
+          actor: bob,
+        });
+        assert.deepStrictEqual(yield* stamped(driving, "bob-prompt"), { message: bob, item: bob });
+        assert.deepStrictEqual((yield* orchestrator.getThreadShell(driving))?.actor, alice);
+
+        // An agent in the driving thread messages a thread Carol started: it acts for Bob.
+        const target = ThreadId.make("runtime-layer-actor-target");
+        yield* createThread("target", carol);
+        yield* send("agent-send", target, {
+          createdBy: "agent",
+          creationSource: "mcp",
+          senderThreadId: driving,
+        });
+        assert.deepStrictEqual(yield* stamped(target, "agent-send"), { message: bob, item: bob });
+
+        // A server continuation names no sender, so it acts for the target thread's driver.
+        const idle = ThreadId.make("runtime-layer-actor-idle");
+        yield* createThread("idle", carol);
+        yield* send("continuation", idle, { createdBy: "agent", creationSource: "server" });
+        assert.deepStrictEqual(yield* stamped(idle, "continuation"), {
+          message: carol,
+          item: carol,
+        });
+
+        // An external MCP client has no thread here and asked for nobody: it borrows no driver.
+        const external = ThreadId.make("runtime-layer-actor-external");
+        yield* createThread("external", alice);
+        yield* send("external-send", external, { createdBy: "agent", creationSource: "mcp" });
+        assert.deepStrictEqual(yield* stamped(external, "external-send"), {
+          message: undefined,
+          item: undefined,
+        });
+      }),
   );
 
   it.effect("settles a thread its own agent settled once the turn completes", () =>

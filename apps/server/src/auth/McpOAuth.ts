@@ -39,6 +39,8 @@ import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import type * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as PayloadSigner from "./PayloadSigner.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
+// teams
+import * as Teams from "../teams/Teams.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 import {
   base64UrlDecodeUtf8,
@@ -261,6 +263,8 @@ export const redirectForError = (error: McpOAuthRedirectError, issuer: string) =
 
 const make = Effect.gen(function* () {
   const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
+  // teams: approving an agent manages access, so it needs a member.
+  const teams = yield* Teams.Teams;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const random = yield* SecureRandom.SecureRandom;
   const digester = yield* Digest.Digest;
@@ -425,6 +429,9 @@ const make = Effect.gen(function* () {
 
   const approvingSession: McpOAuth["Service"]["approvingSession"] = (request, authorization) =>
     environmentAuth.authenticateHttpRequest(request).pipe(
+      Effect.tap((session) =>
+        Teams.requireSessionActor(session).pipe(Effect.provideService(Teams.Teams, teams)),
+      ),
       Effect.flatMap((session) =>
         // Approving manages access, and a session may only hand out scopes it holds.
         session.scopes.includes(AuthAccessWriteScope) &&

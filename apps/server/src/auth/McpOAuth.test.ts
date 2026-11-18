@@ -758,9 +758,15 @@ it.live("one-click approves only access the browser session holds the scopes for
     Effect.gen(function* () {
       const clientId = yield* registeredClientId(handler);
       const params = authorizeParams(clientId);
-      const browserCookie = (scopes: NonNullable<AuthCreatePairingCredentialInput["scopes"]>) =>
+      const browserCookie = (
+        scopes: NonNullable<AuthCreatePairingCredentialInput["scopes"]>,
+        member: boolean = true,
+      ) =>
         Effect.gen(function* () {
-          const pairing = yield* auth.issuePairingCredential({ scopes });
+          const pairing = yield* auth.issuePairingCredential({
+            scopes,
+            ...(member ? { teamMember: { name: "Ada" } } : {}),
+          });
           const response = yield* handler(
             at("/api/auth/browser-session", {
               method: "POST",
@@ -793,6 +799,10 @@ it.live("one-click approves only access the browser session holds the scopes for
       );
       expect(new URL(oneClick.redirectTo!).searchParams.get("code")).toEqual(expect.any(String));
 
+      // teams: a session that is nobody on the team can't approve an agent.
+      const stranger = yield* browserCookie([...AuthStandardClientScopes], false);
+      expect((yield* details(stranger)).csrfToken).toBeUndefined();
+
       const accessOnly = yield* browserCookie(["access:read", "access:write"]);
       expect((yield* details(accessOnly)).csrfToken).toBeUndefined();
       const forged = yield* decide(
@@ -824,7 +834,13 @@ it.live("one-click approves only access the browser session holds the scopes for
       expect(new URL(readOnly.redirectTo!).searchParams.get("code")).toEqual(expect.any(String));
 
       // The hosted app approves with the owner's T3 Connect session, which sends no cookie.
-      const connect = `Bearer ${(yield* auth.issueSession({ scopes: [...AuthStandardClientScopes] })).token}`;
+      const connectLink = yield* auth.issuePairingCredential({ teamMember: { name: "Ada" } });
+      const connectToken = yield* auth.exchangeBootstrapCredentialForAccessToken(
+        connectLink.credential,
+        undefined,
+        { deviceType: "mobile" },
+      );
+      const connect = `Bearer ${connectToken.access_token}`;
       const connectDetails = yield* details(connect);
       expect(connectDetails.oneClickAccess).toContain("full-access");
       const viaConnect = yield* decide(
@@ -838,17 +854,22 @@ it.live("one-click approves only access the browser session holds the scopes for
       // The hosted app may load and decide with two credentials minted for the same browser key.
       const key = makeDpopKey();
       const dpopSession = (thumbprint: string) =>
-        auth.issuePairingCredential({ scopes: [...AuthStandardClientScopes] }).pipe(
-          Effect.flatMap((pairing) =>
-            auth.exchangeBootstrapCredentialForAccessToken(
-              pairing.credential,
-              undefined,
-              { deviceType: "desktop" },
-              { proofKeyThumbprint: thumbprint },
+        auth
+          .issuePairingCredential({
+            scopes: [...AuthStandardClientScopes],
+            teamMember: { name: "Ada" },
+          })
+          .pipe(
+            Effect.flatMap((pairing) =>
+              auth.exchangeBootstrapCredentialForAccessToken(
+                pairing.credential,
+                undefined,
+                { deviceType: "desktop" },
+                { proofKeyThumbprint: thumbprint },
+              ),
             ),
-          ),
-          Effect.map((exchanged) => exchanged.access_token),
-        );
+            Effect.map((exchanged) => exchanged.access_token),
+          );
       const iat = Math.floor((yield* Clock.currentTimeMillis) / 1_000);
       const dpopHeaders = (signer: typeof key, token: string, path: string) => ({
         authorization: `DPoP ${token}`,

@@ -17,6 +17,7 @@ import {
   OrchestrationV2ThreadLaunchWorkspaceStrategy,
 } from "./orchestrationV2.ts";
 import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
+import { TeamActor } from "./teams.ts";
 
 const TimeOfDay = TrimmedNonEmptyString.check(
   Schema.isPattern(/^([01]?\d|2[0-3]):([0-5]\d)$/),
@@ -253,6 +254,8 @@ export const ScheduledTask = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   createdBy: OrchestrationV2Actor,
   creationSource: OrchestrationV2CreationSource,
+  /** teams: who created the task; its runs act on their behalf. Only the server sets it. */
+  actor: Schema.optional(TeamActor),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   nextRunAt: Schema.NullOr(IsoDateTime),

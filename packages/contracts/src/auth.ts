@@ -9,6 +9,7 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { RuntimeMode } from "./providerPolicy.ts";
+import { TeamActor, TeamMember, TeamPairingMemberInput } from "./teams.ts";
 
 export const ServerAuthPolicy = Schema.Literals([
   "desktop-managed-local",
@@ -365,6 +366,8 @@ export const AuthPairingLink = Schema.Struct({
   expiresAt: Schema.DateTimeUtc,
   /** Set while a T3 Connect device waits for approval. Older servers never send it. */
   connectDeviceRequest: Schema.optionalKey(AuthConnectDeviceRequest),
+  /** teams: name snapshot; current names come from `AuthAccessSnapshot.teamMembers`. */
+  teamMember: Schema.optionalKey(TeamActor),
 });
 export type AuthPairingLink = typeof AuthPairingLink.Type;
 
@@ -388,6 +391,8 @@ export const AuthClientSession = Schema.Struct({
   lastConnectedAt: Schema.NullOr(Schema.DateTimeUtc),
   connected: Schema.Boolean,
   current: Schema.Boolean,
+  /** teams: name snapshot; current names come from `AuthAccessSnapshot.teamMembers`. */
+  teamMember: Schema.optionalKey(TeamActor),
 });
 export type AuthClientSession = typeof AuthClientSession.Type;
 
@@ -396,6 +401,11 @@ export const AuthAccessSnapshot = Schema.Struct({
   clientSessions: Schema.Array(AuthClientSession),
   /** Older servers omit it; they have no device approval. */
   connectDevices: Schema.optionalKey(Schema.Array(AuthConnectDevice)),
+  /**
+   * teams: member changes resend a whole `snapshot` event instead of a new event type, so
+   * upstream clients connected to a teams server still decode the stream.
+   */
+  teamMembers: Schema.optionalKey(Schema.Array(TeamMember)),
 });
 export type AuthAccessSnapshot = typeof AuthAccessSnapshot.Type;
 
@@ -503,6 +513,8 @@ export type AuthRevokeConnectDeviceResult = typeof AuthRevokeConnectDeviceResult
 const pairingCredentialFields = {
   label: Schema.optionalKey(TrimmedNonEmptyString),
   scopes: Schema.optionalKey(AuthGrantScopes),
+  /** teams: the member a client paired with this link signs in as. */
+  teamMember: Schema.optionalKey(TeamPairingMemberInput),
 };
 
 export const AuthCreatePairingCredentialInput = Schema.Union([
@@ -526,6 +538,11 @@ export const AuthSessionState = Schema.Struct({
   permissions: authScopeResponseFields.permissions,
   sessionMethod: Schema.optionalKey(ServerAuthSessionMethod),
   expiresAt: Schema.optionalKey(Schema.DateTimeUtc),
+  /**
+   * teams: null on a teams server when this session is not a member and cannot send work.
+   * Absent from servers without teams, so clients show nothing there.
+   */
+  teamMember: Schema.optionalKey(Schema.NullOr(TeamActor)),
 });
 export type AuthSessionState = typeof AuthSessionState.Type;
 

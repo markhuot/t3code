@@ -31,6 +31,7 @@ import { Command, Flag, GlobalFlag } from "effect/cli";
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import { pairingLinkTeamMember, teamMemberFlags } from "../teams/cliFlags.ts"; // teams
 import * as ServerConfig from "../config.ts";
 import * as ManagedLimits from "../policy/managedLimits.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
@@ -483,6 +484,7 @@ const mintPairingLink = Effect.fn("pair.mintPairingLink")(function* (input: {
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
   readonly ttl: Option.Option<Duration.Duration>;
   readonly label: Option.Option<string>;
+  readonly teamMember: ReturnType<typeof pairingLinkTeamMember>; // teams
 }) {
   return yield* Effect.gen(function* () {
     const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
@@ -491,6 +493,7 @@ const mintPairingLink = Effect.fn("pair.mintPairingLink")(function* (input: {
       subject: "one-time-token",
       label: Option.getOrElse(input.label, () => "t3 pair"),
       ...(Option.isSome(input.ttl) ? { ttl: input.ttl.value } : {}),
+      ...input.teamMember, // teams
     });
   }).pipe(
     Effect.provide(
@@ -535,6 +538,7 @@ export const pairCommand = Command.make("pair", {
   label: labelFlag,
   tailscale: tailscaleFlag,
   tailscaleServePort: tailscaleServePortFlag,
+  ...teamMemberFlags, // teams
 }).pipe(
   Command.withDescription(
     "Mint a pairing token for a running T3 Code server and print it as a QR code.",
@@ -604,6 +608,7 @@ export const pairCommand = Command.make("pair", {
         scopes: flags.scopes,
         ttl: flags.ttl,
         label: flags.label,
+        teamMember: pairingLinkTeamMember(flags), // teams
       });
       const pairingUrl = buildPairingUrl(pairingBaseUrl, issued.credential);
 

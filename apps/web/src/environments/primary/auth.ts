@@ -112,6 +112,7 @@ export interface ServerPairingLinkRecord {
   readonly createdAt: string;
   readonly expiresAt: string;
   readonly connectDeviceRequest?: AuthConnectDeviceRequest;
+  readonly teamMember?: import("@t3tools/contracts").TeamActor;
 }
 
 export interface ServerClientSessionRecord {
@@ -125,6 +126,7 @@ export interface ServerClientSessionRecord {
   readonly lastConnectedAt: string | null;
   readonly connected: boolean;
   readonly current: boolean;
+  readonly teamMember?: import("@t3tools/contracts").TeamActor;
 }
 
 type ServerAuthGateState =

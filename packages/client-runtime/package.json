@@ -75,6 +75,10 @@
       "types": "./src/projectFaviconCache.ts",
       "default": "./src/projectFaviconCache.ts"
     },
+    "./team-actor": {
+      "types": "./src/teamActor.ts",
+      "default": "./src/teamActor.ts"
+    },
     "./user-message": {
       "types": "./src/userMessage.ts",
       "default": "./src/userMessage.ts"

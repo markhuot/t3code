@@ -7,6 +7,8 @@ import type {
   AuthCreatePairingCredentialInput,
   AuthRevokeClientSessionInput,
   AuthRevokePairingLinkInput,
+  TeamMemberRemoveInput,
+  TeamMemberUpdateInput,
 } from "@t3tools/contracts";
 import { WS_METHODS } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -121,6 +123,28 @@ export function createAuthEnvironmentAtoms<R, E>(
           url: (urls) => urls.revokeClient(),
           timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
           request: ({ client, headers }) => client.revokeClient({ headers, payload: input }),
+        }),
+    }),
+    updateTeamMember: createEnvironmentCommand(runtime, {
+      label: "environment-data:server:auth-update-team-member",
+      execute: (input: TeamMemberUpdateInput) =>
+        executeConnectedEnvironmentHttpRequest({
+          group: "auth",
+          method: "POST",
+          url: (urls) => urls.updateTeamMember(),
+          timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+          request: ({ client, headers }) => client.updateTeamMember({ headers, payload: input }),
+        }),
+    }),
+    removeTeamMember: createEnvironmentCommand(runtime, {
+      label: "environment-data:server:auth-remove-team-member",
+      execute: (input: TeamMemberRemoveInput) =>
+        executeConnectedEnvironmentHttpRequest({
+          group: "auth",
+          method: "POST",
+          url: (urls) => urls.removeTeamMember(),
+          timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+          request: ({ client, headers }) => client.removeTeamMember({ headers, payload: input }),
         }),
     }),
     revokeOtherClients: createEnvironmentCommand(runtime, {

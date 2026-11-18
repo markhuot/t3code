@@ -40,6 +40,7 @@ import {
   resolveProjectProviderInstanceEnabled,
   RunId,
   type ScheduledTaskId,
+  type TeamActor,
   ThreadId,
   type TurnItemId,
 } from "@t3tools/contracts";
@@ -71,12 +72,15 @@ import { projectTurnItemForDetail } from "./WireProjection.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { ThreadWorktreeRestore } from "../workspace/restoreMissingWorktree.ts";
+import { withTeamActor } from "./teamsActor.ts";
 
 export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
 
 export interface ThreadManagementProvenance {
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
+  /** teams: the signed-in member; replaces any actor the client sent. */
+  readonly actor?: TeamActor | undefined;
 }
 
 export function withCreationProvenance(
@@ -90,18 +94,26 @@ export function withCreationProvenance(
         linkOrigin: _linkOrigin,
         delegatedFrom: _delegatedFrom,
         initialMessage: _initialMessage,
+        actor: _actor,
         ...rest
       } = command;
-      return { ...rest, ...provenance };
+      return { ...rest, ...stampedProvenance(provenance) };
     }
     case "message.dispatch":
     case "thread.fork":
     case "thread.merge_back":
-    case "delegated_task.request":
-      return { ...command, ...provenance };
+    case "delegated_task.request": {
+      const { actor: _actor, ...rest } = command;
+      return { ...rest, ...stampedProvenance(provenance) };
+    }
     default:
       return command;
   }
+}
+
+// teams: an undefined actor is dropped rather than spread, so a stamp never carries `actor: undefined`.
+function stampedProvenance({ actor, ...provenance }: ThreadManagementProvenance) {
+  return { ...provenance, ...withTeamActor(actor) };
 }
 
 function existingThreadIdsForCommand(
@@ -161,6 +173,8 @@ export interface ThreadManagementSendInput {
   readonly freshContext?: boolean;
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
+  /** teams: omitted, the orchestrator inherits the sender or target thread's driver. */
+  readonly actor?: TeamActor | undefined;
 }
 
 export interface ThreadManagementSendResult {
@@ -451,6 +465,7 @@ export interface ThreadManagementServiceShape {
     Orchestrator.OrchestratorV2Error
   >;
   readonly getThreadShell: Orchestrator.OrchestratorV2["Service"]["getThreadShell"];
+  readonly getThreadDriver: Orchestrator.OrchestratorV2["Service"]["getThreadDriver"]; // teams
   readonly listAppOwnedChildThreadIds: Orchestrator.OrchestratorV2["Service"]["listAppOwnedChildThreadIds"];
   readonly getThreadLinkMetadata: Orchestrator.OrchestratorV2["Service"]["getThreadLinkMetadata"];
   readonly getThreadTitles: Orchestrator.OrchestratorV2["Service"]["getThreadTitles"];
@@ -939,6 +954,7 @@ const make = Effect.gen(function* () {
       ...(mode === "auto" ? { deliveryIntent: "auto" } : {}),
       createdBy: input.createdBy,
       creationSource: input.creationSource,
+      ...withTeamActor(input.actor),
     });
     const projection = yield* getProjectThreadRecords(input, ["runs", "messages", "turnItems"], {
       messageIds: [input.messageId],
@@ -1760,6 +1776,7 @@ const make = Effect.gen(function* () {
     listOlderSettledThreads: orchestrator.listOlderSettledThreads,
     readShellSnapshot: orchestrator.readShellSnapshot,
     getThreadShell: orchestrator.getThreadShell,
+    getThreadDriver: orchestrator.getThreadDriver, // teams
     listAppOwnedChildThreadIds: Effect.fn("ThreadManagementService.listAppOwnedChildThreadIds")(
       function (threadId) {
         return ensureProjectionTranscript(threadId).pipe(

@@ -21,6 +21,7 @@ import {
 import { threadPullRequestsOf } from "../sourceControl/threadPullRequests.ts";
 import type {
   OrchestrationV2AppThread,
+  TeamActor,
   OrchestrationV2Checkpoint,
   OrchestrationV2CheckpointScope,
   OrchestrationV2ExecutionNode,
@@ -93,6 +94,7 @@ import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+import { readThreadDriver, withTeamActor } from "./teamsActor.ts";
 import type * as Statement from "effect/sql/Statement";
 
 import { MCP_APP_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
@@ -632,6 +634,10 @@ export interface ProjectionStoreV2Shape {
   readonly findThread: (
     threadId: ThreadId,
   ) => Effect.Effect<OrchestrationV2AppThread | null, ProjectionStoreV2Error>;
+  /** teams: who the thread works for; see `teamsActor.ts`. */
+  readonly getThreadDriver: (
+    threadId: ThreadId,
+  ) => Effect.Effect<TeamActor | undefined, ProjectionStoreV2Error>;
   readonly getLimitRecoveryCandidates: (options: {
     readonly now: DateTime.Utc;
     readonly autoResume: boolean;
@@ -1821,6 +1827,7 @@ export function threadShellFromProjection(
   return {
     createdBy: projection.thread.createdBy,
     creationSource: projection.thread.creationSource,
+    ...withTeamActor(projection.thread.actor),
     id: projection.thread.id,
     projectId: projection.thread.projectId,
     title: projection.thread.title,
@@ -2135,6 +2142,7 @@ function shellFromState(input: {
   return {
     createdBy: input.state.thread.createdBy,
     creationSource: input.state.thread.creationSource,
+    ...withTeamActor(input.state.thread.actor),
     id: input.state.thread.id,
     projectId: input.state.thread.projectId,
     title: input.state.thread.title,
@@ -9405,6 +9413,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       findGuestShareThreadId: readOnReader(findGuestShareThreadId),
       getThread: readOnReader(getThread),
       findThread: readOnReader(findThread),
+      // teams
+      getThreadDriver: readOnReader((threadId: ThreadId) =>
+        readThreadDriver(sql, threadId).pipe(
+          Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })),
+        ),
+      ),
       getSettlementCandidates: readOnReader(getSettlementCandidates),
       getThreadsWithPullRequests: readOnReader(getThreadsWithPullRequests),
       getThreadTitles: readOnReader(getThreadTitles),
